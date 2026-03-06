@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**pd-manager** is a Kubernetes Operator service for managing PD (Prefill-Decode) disaggregated inference instances. It acts as a high-level orchestration layer on top of RBG (RoleBasedGroup) CRDs, translating user-facing `PDInferenceService` resources into RBG workloads that run SGLang inference engines.
+**pd-manager** is a Kubernetes Operator that provides a high-level user-facing API for managing PD (Prefill-Decode) disaggregated LLM inference instances. It acts as a translation and orchestration layer on top of RBG (RoleBasedGroup) CRDs, converting user-declared `PDInferenceService` resources into multi-role RBG workloads running SGLang inference engines.
 
 ## Tech Stack
 
@@ -23,38 +23,65 @@ Four-layer architecture:
 User Interface Layer     →  REST API / CLI / Web Console
 pd-manager Operator      →  Core translation & orchestration (this repo)
 RBG Operator             →  Workload orchestration (RoleBasedGroup CRD)
-SGLang Inference Engine  →  Prefill / Decode pods
+SGLang Inference Engine  →  Prefill / Decode / Scheduler pods
 ```
 
 ### Core CRD: PDInferenceService
 
-pd-manager exposes a single user-facing CRD (`pdai.io/v1alpha1 / PDInferenceService`) that abstracts PD disaggregation details. The Reconciler translates it into an RBG `RoleBasedGroup` with three roles:
+pd-manager exposes a single user-facing CRD (`pdai.io/v1alpha1 / PDInferenceService`). The Reconciler translates it into an RBG `RoleBasedGroup` with three roles:
 
 | Role | SGLang Flag | Purpose |
 |------|-------------|---------|
-| `scheduler` | mini_lb router | Route requests to Prefill/Decode pairs |
-| `prefill` | `--disaggregation-mode prefill` | Prefill computation + KV Cache transfer via RDMA |
-| `decode` | `--disaggregation-mode decode` | Token generation using transferred KV Cache |
+| `scheduler` | sgl-router | Routes requests; cache-aware / power-of-two / round-robin strategies |
+| `prefill` | `--disaggregation-mode prefill` | Forward computation + KV Cache transfer via GPU Direct RDMA |
+| `decode` | `--disaggregation-mode decode` | Pre-allocates GPU memory; token generation using transferred KV Cache |
 
 ### Reconciler Pipeline (5 steps)
 
-1. **Spec validation & defaulting** — Admission Webhook validates GPU type, model existence, P:D ratio; injects defaults (engine=sglang, transfer_backend=mooncake)
-2. **RBG Spec construction** — Translate PDInferenceService fields to RBG role definitions with dependency declarations
+1. **Spec validation & defaulting** — Admission Webhook validates GPU type, model existence, P:D ratio; injects defaults (engine=sglang, transferBackend=mooncake)
+2. **RBG Spec construction** — Translate PDInferenceService fields to RBG role definitions with dependency declarations (scheduler → prefill → decode)
 3. **RBG resource apply** — Create/Update RoleBasedGroup with `ownerReference` pointing to PDInferenceService (enables cascade delete)
 4. **Status aggregation** — Watch RBG status, aggregate Pod readiness and Service Endpoints into PDInferenceService Status using `meta/v1 Condition` pattern
-5. **Scale coordination** — On HPA/KEDA trigger, recompute Prefill/Decode replica counts from `pdRatio`, update RBG Spec to drive coordinated scaling
+5. **Scale coordination** — Two sub-responsibilities:
+   - **HPA bridge setup**: Set `scalingAdapter.enable: true` on the decode role in RBG spec. RBG will auto-create a `RoleBasedGroupScalingAdapter` (RBGSA) CR that implements the `scale` subresource. pd-manager then creates an HPA object pointing to this RBGSA. HPA writes `rbgsa.spec.replicas`; the RBGSA reconciler propagates that into `rbg.spec.roles[decode].replicas`.
+   - **pdRatio maintenance**: When decode replicas change (via HPA → RBGSA → RBG), pd-manager detects the change by watching RBG, recomputes `prefill replicas = decode replicas × ratio`, and writes the new value back to `rbg.spec.roles[prefill].replicas`.
+   - **Coordination field**: The RBG `coordination` field controls scale-up *pacing* (MaxSkew = max deployment-progress difference between roles), NOT ratio enforcement. pd-manager sets this field to coordinate the pace at which prefill and decode scale up together.
 
 ## Key Design Decisions
 
-- **RBG over LWS**: RBG is used (not LeaderWorkerSet) because it natively supports multi-role topologies, injects topology info into Pods, and provides coordinated scaling via its `coordination` field.
 - **RBG client integration**: Import RBG's `client-go/` directory directly as a Go module — do not hand-maintain CRD schemas.
 - **Engine abstraction**: Internal Strategy Pattern (`engine` field) to support sglang/vllm adapters without interface changes.
 - **Service discovery**: RBG creates Headless Services with predictable DNS names (e.g., `sglang-pd-prefill-0.sglang-pd-prefill`); SGLang Model Gateway discovers Prefill/Decode pods via Label Selectors (`--prefill-selector`, `--decode-selector`).
+- **pdRatio vs HPA**: These are complementary, not overlapping. HPA decides decode count; pdRatio derives prefill count from decode. They are mutually exclusive on prefill — Admission Webhook rejects configs that set both pdRatio and prefill HPA.
+- **Engine config layering**: Three-tier priority — pd-manager-owned args (immutable) > user inline `engineConfig` > `PDEngineProfile` template. See `docs/design/engine-config.md`.
+- **KV transfer config passthrough**: `kvTransfer.config` is serialized as JSON and passed directly to SGLang as `--kv-transfer-config`; pd-manager does not parse its semantics.
+
+## Scaling — RBG HPA Bridge
+
+```
+HPA ──writes──▶ RoleBasedGroupScalingAdapter.spec.replicas
+                  │  (RBGSA auto-created by RBG when scalingAdapter.enable=true)
+                  ▼
+             RBG.spec.roles[decode].replicas
+                  │  (pd-manager watches RBG)
+                  ▼
+             pd-manager recomputes prefill = decode × ratio
+                  ▼
+             RBG.spec.roles[prefill].replicas
+```
+
+| Responsibility | Owner |
+|----------------|-------|
+| Set `scalingAdapter.enable: true` on decode role | pd-manager |
+| Auto-create RoleBasedGroupScalingAdapter (RBGSA) CR | RBG |
+| Create HPA with scaleTargetRef pointing to RBGSA | pd-manager |
+| Sync HPA → RBGSA → RBG decode replicas | RBG (RBGSA reconciler) |
+| Watch RBG, recompute and write prefill replicas per pdRatio | pd-manager |
+| Coordinate scale-up pacing (coordination MaxSkew) | pd-manager configures + RBG executes |
 
 ## REST API
 
-RESTful API alongside the CRD interface:
-
+- `GET /api/v1/pd-inference-services` — List all instances
 - `POST /api/v1/pd-inference-services` — Create instance
 - `GET /api/v1/pd-inference-services/{name}` — Query status
 - `PUT /api/v1/pd-inference-services/{name}` — Update (scale / config change)
@@ -62,40 +89,32 @@ RESTful API alongside the CRD interface:
 
 ## Development Commands
 
-> Commands will be added here as the project is bootstrapped.
-
 ```bash
-# Generate CRD manifests and DeepCopy methods
-make generate manifests
-
-# Run controller locally against a cluster (uses KUBECONFIG)
-make run
-
-# Build the operator binary
-make build
-
-# Run unit tests
-go test ./...
-
-# Run a single test
+make generate manifests   # Generate CRD manifests and DeepCopy methods
+make build                # Build the operator binary
+make run                  # Run locally against cluster (uses KUBECONFIG)
+go test ./...             # Run all unit tests
 go test ./internal/controller/... -run TestReconcilePDInferenceService
-
-# Build and push Docker image
 make docker-build docker-push IMG=<registry>/pd-manager:<tag>
-
-# Deploy to cluster
 make deploy IMG=<registry>/pd-manager:<tag>
 ```
 
-## KV Cache Transfer
+## Environmental Information
+### code develop environment
+wsl环境:
+本地wsl 
+代码位置: /home/zzy/code/pd-manager
+### test environment
+a30环境：
+地址：183.56.181.9
+端口：34451
+用户名：a30
+可以免密码登录
 
-SGLang transfers KV Cache from Prefill to Decode via GPU Direct RDMA. Supported backends:
+## Key Reference Files
 
-- **mooncake** (default) — Alibaba's RDMA-based transfer
-- **nccl** — NVIDIA Collective Communications Library
-- Requires high-performance RDMA NICs (e.g., eRDMA on Alibaba Cloud)
+- `docs/design/engine-config.md` — SGLang engine config layering design (PDEngineProfile CRD, extraArgs merge rules, translation to SGLang flags)
 
-## Scaling Modes
 
-1. **HPA/KEDA auto-scaling** — Based on GPU utilization, request queue depth
-2. **pdRatio-linked scaling** — Maintains configured Prefill:Decode ratio across scale events; handled by RBG's Coordination engine
+
+需要修改之后进行验证。
