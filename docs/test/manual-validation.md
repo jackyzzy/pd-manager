@@ -6,35 +6,76 @@
 |------|-----|
 | 开发环境 | 本地 WSL (`/home/zzy/code/pd-manager`) |
 | 测试环境 | a30（`ssh a30@183.56.181.9 -p 34451`，免密登录）|
+| a30 代码路径 | `/home/a30/rbg-deployment/pd-manager` |
 | RBG Operator | 已预装于 a30 |
 | GPU 节点 | 已标记 `accelerator=a30` |
+| 模型路径 | `/data/model/qwen3-14b`（节点本地） |
+| pd-manager Namespace | `pd-manager-system` |
 
 ## 前置条件
 
 1. a30 环境已安装 RBG Operator（提供 `RoleBasedGroup` CRD）
-2. `kubectl` 已配置指向 a30 集群
-3. 镜像已推送到 a30 可访问的 Registry
-4. pd-system namespace 已创建：`kubectl create namespace pd-system`
+2. a30 上 `kubectl` 已配置指向本地集群
+3. pd-manager 已部署（见下方部署步骤；若已部署可直接跳到验收用例）
+4. `pd-manager-system` namespace 已创建
 
 ## 部署步骤
 
-### 1. WSL 构建并推送镜像
+> **注意**：a30 无公网访问，使用 vendor 模式构建，通过 containerd 直接导入镜像（不走 Registry）。
+
+### 1. WSL 同步代码到 a30
 
 ```bash
-# 在 WSL 中
-cd /home/zzy/code/pd-manager
-make docker-build docker-push IMG=<registry>/pd-manager:latest
+# 在 WSL 中同步源码（vendor 目录需同步，a30 无法访问 proxy.golang.org）
+rsync -avz --exclude='.git' --exclude='bin/' \
+  /home/zzy/code/pd-manager/ \
+  a30@183.56.181.9:/home/a30/rbg-deployment/pd-manager/ \
+  -e "ssh -p 34451"
+
+# 同步 rbg 本地模块（go.mod replace 依赖）
+rsync -avz --exclude='.git' \
+  /home/zzy/code/rbg/ \
+  a30@183.56.181.9:/home/a30/rbg-deployment/rbg/ \
+  -e "ssh -p 34451"
 ```
 
-### 2. 在 a30 上部署 CRD + RBAC + Manager
+### 2. 在 a30 上构建镜像并导入 containerd
 
 ```bash
-# 在 a30 上（或 WSL 通过 KUBECONFIG 指向 a30）
-kubectl apply -k config/default
+# 在 a30 上
+cd /home/a30/rbg-deployment/pd-manager
+
+# 修复 vendor/modules.txt 中的本地路径（每次 rsync 后需执行）
+sed -i 's|=> /home/zzy/code/rbg|=> ../rbg|g' vendor/modules.txt
+
+# 构建镜像（使用 --network=host 绕过 iptables 问题）
+docker build --network=host -t pd-manager:v0.0.1 .
+
+# 导入到 containerd（k8s.io 命名空间）
+docker save pd-manager:v0.0.1 | sudo ctr -n k8s.io images import -
+```
+
+### 3. 在 a30 上部署 CRD + RBAC + Manager
+
+```bash
+# 在 a30 上
+cd /home/a30/rbg-deployment/pd-manager
+
+# 安装 CRD（包括 RBG CRD）
+make install
+
+# 部署 Operator（使用本地镜像，imagePullPolicy: Never）
+make deploy IMG=pd-manager:v0.0.1
 
 # 验证 Manager Pod 就绪
-kubectl rollout status deploy/pd-manager-controller-manager -n pd-system
+kubectl rollout status deploy/pd-manager-controller-manager -n pd-manager-system --timeout=60s
 ```
+
+> **Webhook TLS**：a30 无 cert-manager，需手动配置自签证书。若 Pod 因 TLS 报错无法启动，参考以下命令生成并挂载：
+> ```bash
+> openssl req -x509 -newkey rsa:4096 -keyout tls.key -out tls.crt -days 365 -nodes -subj "/CN=pd-manager-webhook-service.pd-manager-system.svc"
+> kubectl create secret tls webhook-server-cert --cert=tls.crt --key=tls.key -n pd-manager-system
+> ```
 
 ---
 
@@ -53,10 +94,10 @@ metadata:
   name: qwen3-14b
   namespace: default
 spec:
-  model: qwen3-14b
+  model: Qwen/Qwen3-14B
   modelStorage:
     type: hostPath
-    hostPath: /data/models
+    hostPath: /data/model/qwen3-14b
     mountPath: /models
   images:
     scheduler: lmsysorg/sgl-model-gateway:v0.3.1
@@ -65,27 +106,65 @@ spec:
   prefill:
     replicas: 1
     resources:
-      gpu: "1"
+      gpu: "2"
       gpuType: a30
   decode:
     replicas: 1
     resources:
-      gpu: "1"
+      gpu: "2"
       gpuType: a30
+  router:
+    strategy: round-robin
+  engineConfig:
+    tensorParallelSize: 2
+    kvTransfer:
+      backend: nixl
+    extraArgs:
+      prefill:
+        - --trust-remote-code
+        - --disable-radix-cache
+        - --mem-fraction-static
+        - "0.88"
+        - --chunked-prefill-size
+        - "8192"
+        - --page-size
+        - "128"
+        - --cuda-graph-max-bs
+        - "256"
+      decode:
+        - --trust-remote-code
+        - --disable-radix-cache
+        - --mem-fraction-static
+        - "0.88"
+        - --chunked-prefill-size
+        - "8192"
+        - --page-size
+        - "128"
+        - --cuda-graph-max-bs
+        - "256"
+      scheduler:
+        - --health-check-timeout-secs
+        - "6000000"
+        - --health-check-interval-secs
+        - "6000"
+        - --worker-startup-timeout-secs
+        - "3600"
+        - --worker-startup-check-interval
+        - "30"
 EOF
 
 # 2. 观察状态变化（期望：Pending → Initializing）
 kubectl get pdis qwen3-14b -w
 
-# 3. 等待就绪（期望：Running）
-kubectl wait pdis qwen3-14b --for=jsonpath='.status.phase'=Running --timeout=10m
+# 3. 等待就绪（期望：Running，Qwen3-14B GPU 加载约 15~25 分钟）
+kubectl wait pdis qwen3-14b --for=jsonpath='.status.phase'=Running --timeout=30m
 ```
 
 **预期结果**：
 - PDInferenceService 创建成功，Phase 在 30s 内变为 Initializing
 - RBG 被自动创建：`kubectl get rbg qwen3-14b`
-- GPU Pod 启动后 Phase 变为 Running
-- 三个角色的 Pod 均处于 Running 状态
+- 6 个 Pod（scheduler×1、prefill×1、decode×1，每个各 2 GPU）启动后 Phase 变为 Running
+- scheduler Pod 日志出现 `Starting server` 或 `Uvicorn running`
 
 ---
 
@@ -112,12 +191,17 @@ kubectl get pdis qwen3-14b -o yaml
 #     ready: 1
 #     total: 1
 
-# 方式二：REST API（通过 pd-manager Service）
-PD_MANAGER_SVC=$(kubectl get svc -n pd-system -l app.kubernetes.io/name=pd-manager -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}')
-curl http://${PD_MANAGER_SVC}:8080/api/v1/pd-inference-services/qwen3-14b
+# 方式二：REST API（通过 port-forward 访问 pd-manager，a30 无 LoadBalancer）
+kubectl port-forward -n pd-manager-system svc/pd-manager-controller-manager-metrics-service 8080:8080 &
+# 或直接 port-forward Pod
+PD_POD=$(kubectl get pod -n pd-manager-system -l control-plane=controller-manager -o jsonpath='{.items[0].metadata.name}')
+kubectl port-forward -n pd-manager-system pod/${PD_POD} 8080:8080 &
+sleep 2
+
+curl http://localhost:8080/api/v1/pd-inference-services/qwen3-14b
 
 # 方式三：列表查询
-curl http://${PD_MANAGER_SVC}:8080/api/v1/pd-inference-services
+curl http://localhost:8080/api/v1/pd-inference-services
 ```
 
 **预期结果**：
@@ -132,8 +216,8 @@ curl http://${PD_MANAGER_SVC}:8080/api/v1/pd-inference-services
 **目标**：通过 REST API 将 decode 副本数从 1 扩容到 2。
 
 ```bash
-# REST API 方式（推荐）
-curl -X PUT http://${PD_MANAGER_SVC}:8080/api/v1/pd-inference-services/qwen3-14b \
+# REST API 方式（推荐；先 port-forward 见 US-02）
+curl -X PUT http://localhost:8080/api/v1/pd-inference-services/qwen3-14b \
   -H 'Content-Type: application/json' \
   -d '{"spec":{"decode":{"replicas":2}}}'
 
@@ -150,7 +234,7 @@ kubectl wait pdis qwen3-14b --for=jsonpath='.status.roleStatuses[?(@.name=="deco
 **不可变字段测试（期望被拒绝）**：
 ```bash
 # 尝试修改 model（不可变字段）→ 应返回 400
-curl -X PUT http://${PD_MANAGER_SVC}:8080/api/v1/pd-inference-services/qwen3-14b \
+curl -X PUT http://localhost:8080/api/v1/pd-inference-services/qwen3-14b \
   -H 'Content-Type: application/json' \
   -d '{"spec":{"model":"new-model"}}'
 # 期望：400 Bad Request，错误信息含 "immutable"
@@ -241,7 +325,7 @@ kubectl delete pdis qwen3-14b
 ```bash
 # 清理所有测试资源
 kubectl delete pdis --all -n default
-kubectl delete pdis --all -n pd-system
+kubectl delete pdis --all -n pd-manager-system
 
 # 验证清理完成
 kubectl get pdis,rbg --all-namespaces
