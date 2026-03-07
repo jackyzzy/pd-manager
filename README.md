@@ -233,9 +233,9 @@ make deploy IMG=<registry>/pd-manager:<tag>
 
 在内存中启动真实的 Kubernetes API Server 和 etcd，注册 CRD（包括 RBG），运行真实的 Reconciler 或 Webhook。用于验证 Reconcile 主流程、Finalizer、ownerReference 和 Webhook 校验规则。Controller 测试通过 Ginkgo `Ordered` + `BeforeAll` 只注册一个 Manager 实例，避免控制器重复注册冲突。
 
-#### L3 E2E 测试（Kind 集群 + 真实部署）
+#### L3a E2E 测试（Kind 集群 + 基础设施层）
 
-在本地 [Kind](https://kind.sigs.k8s.io/)（Kubernetes-in-Docker）集群上执行完整的端到端验证。测试流程如下：
+在本地 [Kind](https://kind.sigs.k8s.io/)（Kubernetes-in-Docker）集群上验证 Operator 基础设施层。测试流程如下：
 
 1. **BeforeSuite**：执行 `make docker-build` 构建 Operator 镜像，通过 `kind load docker-image` 加载到 Kind 集群，安装 cert-manager（v1.16.3，用于 Webhook TLS 证书自动签发）
 2. **BeforeAll**：创建 `pd-manager-system` 命名空间，施加 `restricted` Pod Security Policy，执行 `make install`（安装 CRD）和 `make deploy`（部署 Operator）
@@ -248,9 +248,21 @@ make deploy IMG=<registry>/pd-manager:<tag>
 4. **AfterAll**：自动清理（undeploy、uninstall CRD、删除命名空间）
 5. **失败诊断**：每个 case 失败时自动收集 Controller 日志、K8s Events、curl-metrics Pod 日志和 Pod describe 信息
 
-> **注意**：E2E 测试目前覆盖 Operator 基础设施层（Pod 启动、Metrics、Webhook TLS），PDInferenceService 业务场景（RBG 创建、状态聚合）需在真实 GPU 集群（a30）上进行手动验收，参见 [`docs/test/manual-validation.md`](docs/test/manual-validation.md)。
-
 **依赖工具**：`kind`、`kubectl`、`docker`、`make`
+
+#### L3b 业务场景 E2E 测试（真实 GPU 集群 + 完整推理验证）
+
+在真实 GPU 集群（a30）上验证完整的 PD 推理业务链路（`test/e2e/business/`）。分 5 层业务检查：
+
+| 层次 | 验证内容 | 超时 |
+|------|---------|------|
+| Tier 1 Kubernetes 资源 | RBG 3 角色创建、Finalizer、scheduler worker URLs 正确 | 2 min |
+| Tier 2 Pod 健康 | 无 CrashLoop/OOM/Python Traceback、所有 Pod Running | **30 min**（GPU 加载） |
+| Tier 3 Router API | `GET /health`、`/v1/models` 含模型名、`/health_generate` 验证 worker 注册 | 2 min |
+| Tier 4 推理 | `POST /v1/chat/completions` 返回 200 + 有效文本 | 5 min |
+| Tier 5 级联删除 | 删除 PDIS → RBG 和所有 Pod 消失 | 2 min |
+
+**依赖**：已部署 pd-manager 的 GPU 集群，`KUBECONFIG` 指向目标集群。
 
 ```bash
 # 准备 envtest 二进制（仅需执行一次）
@@ -265,10 +277,14 @@ go test ./internal/controller/... ./internal/webhook/... ./cmd/... -v -timeout 5
 # L1 + L2 全量测试
 go test ./... -timeout 5m
 
-# L3 E2E 测试（需要 kind、docker，约 10~20 分钟）
+# L3a E2E 测试（需要 kind、docker，约 10~20 分钟）
 kind create cluster                          # 创建临时 Kind 集群（已有则跳过）
 go test ./test/e2e/... -v -timeout 30m
 kind delete cluster                          # 测试完成后清理
+
+# L3b 业务场景 E2E 测试（需要真实 GPU 集群，约 40~60 分钟）
+# 前置：pd-manager 已部署，KUBECONFIG 已配置，模型文件位于 /data/model/qwen3-14b
+BUSINESS_E2E=true go test ./test/e2e/business/... -v -timeout 60m
 ```
 
 最新测试结果（本地 WSL，L1 + L2）：
@@ -277,7 +293,7 @@ kind delete cluster                          # 测试完成后清理
 |----|--------|------|------|
 | `api/v1alpha1` | 9 | ~30ms | L1 |
 | `internal/config` | 7 | ~220ms | L1 |
-| `internal/translator` (含 sglang) | 15 | ~80ms | L1 |
+| `internal/translator` (含 sglang) | 18 | ~80ms | L1 |
 | `internal/apiserver` (含 handler) | 13 | ~450ms | L1 |
 | `internal/controller` | 14 | ~14s | L2 |
 | `internal/webhook/v1alpha1` | 10 | ~8s | L2 |

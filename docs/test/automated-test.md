@@ -6,7 +6,8 @@
 |------|------|---------|------|
 | L1 单元测试 | 纯函数，无 I/O | WSL | <10s |
 | L2 集成测试 | envtest（内置 API Server） | WSL | 1~3min |
-| L3 集群冒烟测试 | 真实 k8s（a30） | a30 | 5~10min |
+| L3a 基础设施 E2E | Kind 集群，验证 Operator 基础设施层 | WSL | 10~20min |
+| L3b 业务场景 E2E | 真实 GPU 集群，验证完整推理链路 | a30 | 40~60min |
 
 ---
 
@@ -54,7 +55,7 @@ open coverage.html
 | `api/v1alpha1` | `pdengineprofile_types_test.go` | L1 | Profile 类型、EngineRuntimes 序列化 |
 | `internal/config` | `merger_test.go` | L1 | 三级合并逻辑（7 个用例） |
 | `internal/translator/sglang` | `args_builder_test.go` | L1 | 各角色参数、auto-inject、backend（7 个用例）|
-| `internal/translator` | `rbg_builder_test.go` | L1 | 三角色 RBG、Volume、ownerRef（8 个用例）|
+| `internal/translator` | `rbg_builder_test.go` | L1 | 三角色 RBG、Volume、ownerRef、scheduler args（11 个用例）|
 | `internal/controller` | `status_test.go` | L1 | Phase 计算、状态机、conditions（9 个用例）|
 | `internal/apiserver/handler` | `pdinferenceservice_test.go` | L1 | 5 个 HTTP Handler（10 个用例）|
 | `internal/apiserver` | `server_test.go` | L1 | 路由注册、优雅关闭、健康检查 |
@@ -64,7 +65,64 @@ open coverage.html
 
 ---
 
-## L3：a30 集群冒烟测试
+## L3a：Kind 集群基础设施 E2E 测试
+
+验证 Operator 基础设施层（无需 GPU）：Controller 启动、Metrics 端点、Webhook TLS 证书签发。
+
+```bash
+# 依赖工具：kind、kubectl、docker
+kind create cluster                          # 创建临时 Kind 集群（已有则跳过）
+go test ./test/e2e/... -v -timeout 30m
+kind delete cluster                          # 测试完成后清理
+```
+
+**L3a 覆盖点**：
+- Controller-manager Pod Running
+- Metrics 端点（`:8443/metrics`）含 `controller_runtime_reconcile_total`
+- cert-manager 签发 `webhook-server-cert`
+- MutatingWebhookConfiguration / ValidatingWebhookConfiguration `caBundle` 已注入
+
+---
+
+## L3b：业务场景 E2E 测试（GPU 集群）
+
+在真实 GPU 集群（a30）上验证完整 PD 推理链路。由环境变量 `BUSINESS_E2E=true` 控制，防止意外执行。
+
+### 前置条件
+
+- pd-manager 已部署到目标集群（`pd-manager-system` 命名空间）
+- `KUBECONFIG` 指向目标集群
+- 模型文件位于节点 `/data/model/qwen3-14b`
+
+### 执行命令
+
+```bash
+# 前置：pd-manager 已部署，KUBECONFIG 已配置，模型文件位于 /data/model/qwen3-14b
+BUSINESS_E2E=true go test ./test/e2e/business/... -v -timeout 60m
+```
+
+### 五层业务检查
+
+| 层次 | 验证内容 | 超时 |
+|------|---------|------|
+| Tier 1 Kubernetes 资源 | RBG 3 角色创建、Finalizer、scheduler worker URLs 正确 | 2 min |
+| Tier 2 Pod 健康 | 无 CrashLoop/OOM/Python Traceback、所有 Pod Running | **30 min**（GPU 加载）|
+| Tier 3 Router API | `GET /health` 200、`/v1/models` 含模型名、`/health_generate` 验证 worker 注册 | 2 min |
+| Tier 4 推理 | `POST /v1/chat/completions` 返回 200 + 有效文本 | 5 min |
+| Tier 5 级联删除 | 删除 PDIS → RBG 和所有 Pod 消失 | 2 min |
+
+### 失败诊断
+
+每个 Tier 失败时自动收集：
+- 所有角色 Pod 日志（最后 100 行）
+- `kubectl describe pod` 详情
+- Kubernetes Events
+
+---
+
+## L3a（旧）：a30 集群冒烟测试脚本
+
+> 以下脚本适用于不使用 `go test` 的快速手动验证场景。
 
 ### 部署 pd-manager 到 a30
 
