@@ -1,0 +1,17 @@
+# Build outputs
+bin/
+main
+
+# Test coverage
+coverage.out
+coverage.html
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
