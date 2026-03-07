@@ -223,17 +223,37 @@ make deploy IMG=<registry>/pd-manager:<tag>
 
 ### Testing
 
-```bash
-# All tests (L1 unit + L2 envtest integration)
-go test ./... -timeout 5m
+本项目采用两层测试策略：
 
-# L1 unit tests only (fast, no envtest)
+**L1 单元测试**（纯 Go `testing` 包，无外部依赖）：直接调用被测函数，使用 `fake.Client` 模拟 Kubernetes API，毫秒级完成。覆盖类型定义、配置合并、SGLang 参数构建、RBG 翻译、REST Handler 及 HTTP Server 路由。
+
+**L2 集成测试**（`envtest` + Ginkgo/Gomega）：在内存中启动真实的 Kubernetes API Server 和 etcd，注册 CRD（包括 RBG），运行真实的 Reconciler 或 Webhook。用于验证 Reconcile 主流程、Finalizer、ownerReference 和 Webhook 校验规则。Controller 测试通过 Ginkgo `Ordered` + `BeforeAll` 只注册一个 Manager 实例，避免控制器重复注册冲突。
+
+```bash
+# 准备 envtest 二进制（仅需执行一次）
+make envtest
+
+# L1 单元测试（快速，约 1 秒）
 go test ./api/... ./internal/config/... ./internal/translator/... ./internal/apiserver/... -v
 
-# L2 controller integration tests (requires envtest binaries)
-make envtest
+# L2 集成测试（需要 envtest，约 1~2 分钟）
 go test ./internal/controller/... ./internal/webhook/... ./cmd/... -v -timeout 5m
+
+# 全量测试
+go test ./... -timeout 5m
 ```
+
+最新测试结果（本地 WSL）：
+
+| 包 | 用例数 | 耗时 |
+|----|--------|------|
+| `api/v1alpha1` | 9 | ~30ms |
+| `internal/config` | 7 | ~220ms |
+| `internal/translator` (含 sglang) | 15 | ~80ms |
+| `internal/apiserver` (含 handler) | 13 | ~450ms |
+| `internal/controller` | 14 | ~14s |
+| `internal/webhook/v1alpha1` | 10 | ~8s |
+| `cmd` | 2 | ~23s |
 
 See [`docs/test/automated-test.md`](docs/test/automated-test.md) for the full test guide and [`docs/test/manual-validation.md`](docs/test/manual-validation.md) for the a30 end-to-end validation playbook.
 
