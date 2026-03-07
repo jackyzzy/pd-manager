@@ -95,6 +95,26 @@ func TestBuild_ThreeRolesCreated(t *testing.T) {
 	}
 }
 
+// argsContains checks whether args contains the given flag (possibly with a value).
+func argsContains(args []string, flag string) bool {
+	for _, a := range args {
+		if a == flag {
+			return true
+		}
+	}
+	return false
+}
+
+// argValue returns the value following flag in args, or "".
+func argValue(args []string, flag string) string {
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == flag {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
 // TestBuild_SchedulerRole verifies the scheduler role: replicas=1, correct image,
 // and includes the --policy flag matching the router strategy.
 func TestBuild_SchedulerRole(t *testing.T) {
@@ -122,18 +142,121 @@ func TestBuild_SchedulerRole(t *testing.T) {
 		t.Errorf("scheduler image mismatch: %v", c.Image)
 	}
 
-	foundPolicy := false
-	for i := 0; i < len(c.Args)-1; i++ {
-		if c.Args[i] == "--policy" {
-			foundPolicy = true
-			if c.Args[i+1] != "round-robin" {
-				t.Errorf("--policy should be round-robin, got %v", c.Args[i+1])
-			}
+	args := c.Args
+	if !argsContains(args, "--policy") {
+		t.Errorf("scheduler args should contain --policy; got %v", args)
+	}
+	if argValue(args, "--policy") != "round-robin" {
+		t.Errorf("--policy should be round-robin, got %v", argValue(args, "--policy"))
+	}
+}
+
+// TestBuild_SchedulerRole_PDDisaggregation verifies scheduler args include
+// --pd-disaggregation, --model-path, --host 0.0.0.0.
+func TestBuild_SchedulerRole_PDDisaggregation(t *testing.T) {
+	b := translator.NewRBGBuilder()
+	rbg, err := b.Build(makePDIS("svc1"), makeMergedConfig())
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	scheduler := findRole(rbg, "scheduler")
+	if scheduler == nil || scheduler.Template == nil || len(scheduler.Template.Spec.Containers) == 0 {
+		t.Fatal("scheduler missing")
+	}
+	args := scheduler.Template.Spec.Containers[0].Args
+
+	if !argsContains(args, "--pd-disaggregation") {
+		t.Errorf("scheduler args must contain --pd-disaggregation; got %v", args)
+	}
+	if argValue(args, "--model-path") != "/models" {
+		t.Errorf("--model-path should be /models, got %q", argValue(args, "--model-path"))
+	}
+	if argValue(args, "--host") != "0.0.0.0" {
+		t.Errorf("--host should be 0.0.0.0, got %q", argValue(args, "--host"))
+	}
+}
+
+// TestBuild_SchedulerRole_WorkerURLs verifies that the scheduler args contain
+// the correct --prefill and --decode worker URLs for each replica.
+// PDInferenceService "svc1" in namespace "default" with 2 prefill and 4 decode replicas
+// should produce:
+//   --prefill http://svc1-prefill-0.s-svc1-prefill.default.svc.cluster.local:8000
+//   --prefill http://svc1-prefill-1.s-svc1-prefill.default.svc.cluster.local:8000
+//   --decode  http://svc1-decode-{0..3}.s-svc1-decode.default.svc.cluster.local:8000
+func TestBuild_SchedulerRole_WorkerURLs(t *testing.T) {
+	b := translator.NewRBGBuilder()
+	rbg, err := b.Build(makePDIS("svc1"), makeMergedConfig())
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	scheduler := findRole(rbg, "scheduler")
+	args := scheduler.Template.Spec.Containers[0].Args
+
+	// Collect all --prefill values
+	var prefillURLs, decodeURLs []string
+	for i := 0; i < len(args)-1; i++ {
+		switch args[i] {
+		case "--prefill":
+			prefillURLs = append(prefillURLs, args[i+1])
+		case "--decode":
+			decodeURLs = append(decodeURLs, args[i+1])
+		}
+	}
+
+	if len(prefillURLs) != 2 {
+		t.Errorf("expected 2 prefill URLs (matching Prefill.Replicas=2), got %d: %v", len(prefillURLs), prefillURLs)
+	}
+	if len(decodeURLs) != 4 {
+		t.Errorf("expected 4 decode URLs (matching Decode.Replicas=4), got %d: %v", len(decodeURLs), decodeURLs)
+	}
+
+	expected0 := "http://svc1-prefill-0.s-svc1-prefill.default.svc.cluster.local:8000"
+	expected1 := "http://svc1-prefill-1.s-svc1-prefill.default.svc.cluster.local:8000"
+	if len(prefillURLs) > 0 && prefillURLs[0] != expected0 {
+		t.Errorf("prefill URL[0] mismatch:\n  got  %q\n  want %q", prefillURLs[0], expected0)
+	}
+	if len(prefillURLs) > 1 && prefillURLs[1] != expected1 {
+		t.Errorf("prefill URL[1] mismatch:\n  got  %q\n  want %q", prefillURLs[1], expected1)
+	}
+
+	expectedDecode0 := "http://svc1-decode-0.s-svc1-decode.default.svc.cluster.local:8000"
+	if len(decodeURLs) > 0 && decodeURLs[0] != expectedDecode0 {
+		t.Errorf("decode URL[0] mismatch:\n  got  %q\n  want %q", decodeURLs[0], expectedDecode0)
+	}
+}
+
+// TestBuild_SchedulerRole_ModelVolume verifies the scheduler pod has the model volume mounted.
+func TestBuild_SchedulerRole_ModelVolume(t *testing.T) {
+	b := translator.NewRBGBuilder()
+	rbg, err := b.Build(makePDIS("svc1"), makeMergedConfig())
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	scheduler := findRole(rbg, "scheduler")
+	if scheduler == nil || scheduler.Template == nil {
+		t.Fatal("scheduler template is nil")
+	}
+
+	foundVol := false
+	for _, vol := range scheduler.Template.Spec.Volumes {
+		if vol.HostPath != nil && vol.HostPath.Path == "/data/models" {
+			foundVol = true
 			break
 		}
 	}
-	if !foundPolicy {
-		t.Errorf("scheduler args should contain --policy; got %v", c.Args)
+	if !foundVol {
+		t.Errorf("scheduler should have hostPath volume /data/models; got %v", scheduler.Template.Spec.Volumes)
+	}
+
+	foundMount := false
+	for _, vm := range scheduler.Template.Spec.Containers[0].VolumeMounts {
+		if vm.MountPath == "/models" {
+			foundMount = true
+			break
+		}
+	}
+	if !foundMount {
+		t.Errorf("scheduler container should have volumeMount /models; got %v", scheduler.Template.Spec.Containers[0].VolumeMounts)
 	}
 }
 

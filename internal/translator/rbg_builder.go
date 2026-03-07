@@ -17,6 +17,8 @@ limitations under the License.
 package translator
 
 import (
+	"fmt"
+
 	"github.com/pd-ai/pd-manager/api/v1alpha1"
 	"github.com/pd-ai/pd-manager/internal/config"
 	"github.com/pd-ai/pd-manager/internal/translator/sglang"
@@ -75,16 +77,64 @@ func (b *RBGBuilder) Build(pdis *v1alpha1.PDInferenceService, cfg *config.Merged
 }
 
 // buildSchedulerRole builds the sgl-router scheduler role (always 1 replica).
+// The scheduler receives:
+//   - --pd-disaggregation           (enables PD mode in sgl-router)
+//   - --model-path <mountPath>      (for model metadata)
+//   - --host 0.0.0.0 --port 8000
+//   - --policy <strategy>           (routing strategy)
+//   - --prefill <url>               (one per prefill replica, derived from RBG headless DNS)
+//   - --decode  <url>               (one per decode replica)
+//   - user extraArgs.scheduler      (transparent passthrough)
 func (b *RBGBuilder) buildSchedulerRole(pdis *v1alpha1.PDInferenceService, cfg *config.MergedConfig) rbgv1alpha1.RoleSpec {
-	args := []string{"--port", "8000"}
+	mountPath := "/models"
+	if pdis.Spec.ModelStorage.MountPath != "" {
+		mountPath = pdis.Spec.ModelStorage.MountPath
+	}
+
+	args := []string{
+		"--pd-disaggregation",
+		"--model-path", mountPath,
+		"--host", "0.0.0.0",
+		"--port", "8000",
+	}
 
 	// Inject routing policy from spec.router.strategy
 	if pdis.Spec.Router != nil && pdis.Spec.Router.Strategy != "" {
 		args = append(args, "--policy", string(pdis.Spec.Router.Strategy))
 	}
 
-	// Append scheduler extra args
+	// Generate prefill worker URLs using RBG headless service DNS.
+	// RBG headless service naming: s-<rbgName>-<role>.<namespace>.svc.cluster.local
+	// Pod DNS:                      <rbgName>-<role>-<i>.s-<rbgName>-<role>.<namespace>.svc.cluster.local
+	ns, name := pdis.Namespace, pdis.Name
+	for i := int32(0); i < pdis.Spec.Prefill.Replicas; i++ {
+		url := fmt.Sprintf("http://%s-prefill-%d.s-%s-prefill.%s.svc.cluster.local:8000", name, i, name, ns)
+		args = append(args, "--prefill", url)
+	}
+	for i := int32(0); i < pdis.Spec.Decode.Replicas; i++ {
+		url := fmt.Sprintf("http://%s-decode-%d.s-%s-decode.%s.svc.cluster.local:8000", name, i, name, ns)
+		args = append(args, "--decode", url)
+	}
+
+	// Append scheduler extra args (transparent passthrough)
 	args = append(args, cfg.ExtraArgs.Scheduler...)
+
+	// Scheduler also mounts the model volume (needed by sgl-router for model metadata)
+	hostPathType := corev1.HostPathDirectory
+	volumes := []corev1.Volume{
+		{
+			Name: modelVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: pdis.Spec.ModelStorage.HostPath,
+					Type: &hostPathType,
+				},
+			},
+		},
+	}
+	volumeMounts := []corev1.VolumeMount{
+		{Name: modelVolumeName, MountPath: mountPath},
+	}
 
 	return rbgv1alpha1.RoleSpec{
 		Name:     "scheduler",
@@ -93,11 +143,13 @@ func (b *RBGBuilder) buildSchedulerRole(pdis *v1alpha1.PDInferenceService, cfg *
 		TemplateSource: rbgv1alpha1.TemplateSource{
 			Template: &corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
+					Volumes: volumes,
 					Containers: []corev1.Container{
 						{
-							Name:  "scheduler",
-							Image: cfg.Images.Scheduler,
-							Args:  args,
+							Name:         "scheduler",
+							Image:        cfg.Images.Scheduler,
+							Args:         args,
+							VolumeMounts: volumeMounts,
 						},
 					},
 				},
