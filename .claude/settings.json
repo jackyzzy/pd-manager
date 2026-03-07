@@ -4,7 +4,11 @@
       "Bash(./bin/controller-gen rbac:roleName=manager-role crd webhook paths=./... output:crd:artifacts:config=config/crd/bases -w)",
       "Bash(./bin/controller-gen rbac:roleName=manager-role crd webhook paths=./... output:crd:artifacts:config=config/crd/bases)",
       "Read(//dev/**)",
-      "Bash(ssh -T git@github.com)"
+      "Bash(ssh -T git@github.com)",
+      "Bash(gh auth status)",
+      "Bash(echo $GITHUB_TOKEN)",
+      "Bash(env)",
+      "Bash(printf \"protocol=https\\\\nhost=github.com\\\\n\")"
     ]
   }
 }
