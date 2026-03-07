@@ -67,13 +67,23 @@ RBG (RoleBasedGroup) is designed for multi-role inference topologies:
 Users declare a single resource; pd-manager handles the rest.
 
 ```yaml
-apiVersion: pdai.io/v1alpha1
+apiVersion: pdai.pdai.io/v1alpha1
 kind: PDInferenceService
 metadata:
   name: qwen2-72b
 spec:
   model: Qwen/Qwen2-72B
   engine: sglang                   # sglang | vllm (planned)
+
+  modelStorage:
+    type: hostPath                 # hostPath | pvc
+    hostPath: /data/models
+    mountPath: /models             # default: /models
+
+  images:
+    scheduler: lmsysorg/sgl-model-gateway:v0.3.1
+    prefill: lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
+    decode: lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
 
   prefill:
     replicas: 1
@@ -93,18 +103,14 @@ spec:
   router:
     strategy: cache-aware          # cache-aware | power-of-two | random | round-robin
 
-  # Optional: reference a platform-managed engine profile
+  # Optional: reference a platform-managed engine profile (from pd-system namespace)
   engineProfileRef: h100-mooncake-72b
 
   # Optional: override or extend profile settings
   engineConfig:
     tensorParallelSize: 8
     kvTransfer:
-      backend: mooncake            # mooncake | nccl
-      config:                      # passed as-is to --kv-transfer-config JSON
-        transport: rdma
-        device: erdma0
-    memFractionStatic: 0.9
+      backend: mooncake            # mooncake | nixl | nccl
     extraArgs:                     # appended to SGLang startup command
       prefill:
         - "--chunked-prefill-size=8192"
@@ -116,31 +122,28 @@ spec:
     decode:
       minReplicas: 1
       maxReplicas: 10
-      metrics:
-        - type: Resource
-          resource:
-            name: nvidia.com/gpu
-            target:
-              type: Utilization
-              averageUtilization: 80
 ```
 
 ### Status
 
 ```yaml
 status:
-  phase: Running                   # Pending | Initializing | Running | Failed
+  phase: Running                   # Pending | Initializing | Running | Failed | Terminating
   endpoint: "http://..."           # Router service endpoint
   conditions:
     - type: Ready
       status: "True"
+      reason: AllRolesReady
   roleStatuses:
+    - name: scheduler
+      ready: 1
+      total: 1
     - name: prefill
-      replicas: 1
-      readyReplicas: 1
+      ready: 1
+      total: 1
     - name: decode
-      replicas: 2
-      readyReplicas: 2
+      ready: 2
+      total: 2
 ```
 
 ## Engine Configuration
@@ -185,10 +188,11 @@ HPA ──writes──▶ RoleBasedGroupScalingAdapter.spec.replicas
 
 | Backend | Protocol | Notes |
 |---------|----------|-------|
-| `mooncake` (default) | GPU Direct RDMA | Alibaba's high-performance transfer library |
+| `mooncake` | GPU Direct RDMA | Alibaba's high-performance transfer library |
+| `nixl` | NVIDIA NIXL | NVIDIA Inference Xfer Library |
 | `nccl` | NCCL | NVIDIA Collective Communications Library |
 
-The transfer tool is packaged inside the inference image. pd-manager only passes `--kv-transfer-backend` and `--kv-transfer-config` flags to SGLang.
+pd-manager passes `--disaggregation-transfer-backend` to SGLang for prefill and decode roles.
 
 ## REST API
 
@@ -213,10 +217,25 @@ The transfer tool is packaged inside the inference image. pd-manager only passes
 make generate manifests            # Generate CRD manifests and DeepCopy
 make build                         # Build operator binary
 make run                           # Run locally against cluster (uses KUBECONFIG)
-go test ./...                      # Run all unit tests
 make docker-build docker-push IMG=<registry>/pd-manager:<tag>
 make deploy IMG=<registry>/pd-manager:<tag>
 ```
+
+### Testing
+
+```bash
+# All tests (L1 unit + L2 envtest integration)
+go test ./... -timeout 5m
+
+# L1 unit tests only (fast, no envtest)
+go test ./api/... ./internal/config/... ./internal/translator/... ./internal/apiserver/... -v
+
+# L2 controller integration tests (requires envtest binaries)
+make envtest
+go test ./internal/controller/... ./internal/webhook/... ./cmd/... -v -timeout 5m
+```
+
+See [`docs/test/automated-test.md`](docs/test/automated-test.md) for the full test guide and [`docs/test/manual-validation.md`](docs/test/manual-validation.md) for the a30 end-to-end validation playbook.
 
 ## References
 

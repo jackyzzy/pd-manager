@@ -3,7 +3,8 @@
     "allow": [
       "Bash(./bin/controller-gen rbac:roleName=manager-role crd webhook paths=./... output:crd:artifacts:config=config/crd/bases -w)",
       "Bash(./bin/controller-gen rbac:roleName=manager-role crd webhook paths=./... output:crd:artifacts:config=config/crd/bases)",
-      "Read(//dev/**)"
+      "Read(//dev/**)",
+      "Bash(ssh -T git@github.com)"
     ]
   }
 }
