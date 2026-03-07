@@ -1,0 +1,9 @@
+apiVersion: pdai.pdai.io/v1alpha1
+kind: PDInferenceService
+metadata:
+  labels:
+    app.kubernetes.io/name: pd-manager
+    app.kubernetes.io/managed-by: kustomize
+  name: pdinferenceservice-sample
+spec:
+  # TODO(user): Add fields here

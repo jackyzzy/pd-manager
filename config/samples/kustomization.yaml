@@ -1,0 +1,5 @@
+## Append samples of your project ##
+resources:
+- pdai_v1alpha1_pdinferenceservice.yaml
+- pdai_v1alpha1_pdengineprofile.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

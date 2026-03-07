@@ -1,0 +1,245 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.2
+  name: pdengineprofiles.pdai.pdai.io
+spec:
+  group: pdai.pdai.io
+  names:
+    kind: PDEngineProfile
+    listKind: PDEngineProfileList
+    plural: pdengineprofiles
+    shortNames:
+    - pdep
+    singular: pdengineprofile
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: PDEngineProfile is the Schema for the pdengineprofiles API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: PDEngineProfileSpec defines the desired state of PDEngineProfile.
+            properties:
+              applicability:
+                description: Applicability describes the hardware/model conditions
+                  this profile targets.
+                properties:
+                  gpuTypes:
+                    description: GPUTypes lists compatible GPU model names (e.g. ["A30",
+                      "A100"]).
+                    items:
+                      type: string
+                    type: array
+                  minGpuMemoryGiB:
+                    description: MinGPUMemoryGiB is the minimum GPU memory required
+                      in GiB.
+                    format: int32
+                    type: integer
+                  modelSizeRange:
+                    description: ModelSizeRange is the model size range (in billions)
+                      this profile targets.
+                    properties:
+                      maxB:
+                        description: MaxB is the maximum model size in billions of
+                          parameters.
+                        type: string
+                      minB:
+                        description: MinB is the minimum model size in billions of
+                          parameters.
+                        type: string
+                    type: object
+                  optimizedFor:
+                    description: OptimizedFor describes the workload pattern (e.g.
+                      "throughput", "latency").
+                    type: string
+                  sglangVersionRequired:
+                    description: SGLangVersionRequired is the minimum SGLang version
+                      required.
+                    type: string
+                  tensorParallelSize:
+                    description: TensorParallelSize is the tensor parallel degree
+                      this profile targets.
+                    format: int32
+                    type: integer
+                type: object
+              description:
+                description: Description is a human-readable description of this profile.
+                type: string
+              engineConfig:
+                description: EngineConfig provides the base engine configuration for
+                  this profile.
+                properties:
+                  extraArgs:
+                    description: RoleExtraArgs holds per-role extra arguments to pass
+                      to the inference engine.
+                    properties:
+                      decode:
+                        items:
+                          type: string
+                        type: array
+                      prefill:
+                        items:
+                          type: string
+                        type: array
+                      scheduler:
+                        items:
+                          type: string
+                        type: array
+                    type: object
+                  kvTransfer:
+                    description: KVTransfer configures the KV cache transfer between
+                      prefill and decode.
+                    properties:
+                      backend:
+                        allOf:
+                        - enum:
+                          - mooncake
+                          - nixl
+                          - nccl
+                        - enum:
+                          - mooncake
+                          - nixl
+                          - nccl
+                        description: Backend is the KV transfer backend.
+                        type: string
+                    required:
+                    - backend
+                    type: object
+                  tensorParallelSize:
+                    format: int32
+                    type: integer
+                type: object
+              engineRuntimes:
+                description: EngineRuntimes are forwarded verbatim to the RBG roleSpec.engineRuntimes
+                  field.
+                properties:
+                  decode:
+                    items:
+                      description: |-
+                        EngineRuntime maps to an RBG engineRuntime entry, enabling platform-specific
+                        container arg overrides. pd-manager passes this through without interpreting it.
+                      properties:
+                        containers:
+                          items:
+                            description: |-
+                              RuntimeContainer describes a single container override in an EngineRuntime.
+                              The args are passed through to the RBG engineRuntimes field without parsing.
+                            properties:
+                              args:
+                                items:
+                                  type: string
+                                type: array
+                              name:
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          type: array
+                        profileName:
+                          type: string
+                      required:
+                      - profileName
+                      type: object
+                    type: array
+                  prefill:
+                    items:
+                      description: |-
+                        EngineRuntime maps to an RBG engineRuntime entry, enabling platform-specific
+                        container arg overrides. pd-manager passes this through without interpreting it.
+                      properties:
+                        containers:
+                          items:
+                            description: |-
+                              RuntimeContainer describes a single container override in an EngineRuntime.
+                              The args are passed through to the RBG engineRuntimes field without parsing.
+                            properties:
+                              args:
+                                items:
+                                  type: string
+                                type: array
+                              name:
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          type: array
+                        profileName:
+                          type: string
+                      required:
+                      - profileName
+                      type: object
+                    type: array
+                  scheduler:
+                    items:
+                      description: |-
+                        EngineRuntime maps to an RBG engineRuntime entry, enabling platform-specific
+                        container arg overrides. pd-manager passes this through without interpreting it.
+                      properties:
+                        containers:
+                          items:
+                            description: |-
+                              RuntimeContainer describes a single container override in an EngineRuntime.
+                              The args are passed through to the RBG engineRuntimes field without parsing.
+                            properties:
+                              args:
+                                items:
+                                  type: string
+                                type: array
+                              name:
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          type: array
+                        profileName:
+                          type: string
+                      required:
+                      - profileName
+                      type: object
+                    type: array
+                type: object
+              images:
+                description: Images specifies the container images for each role.
+                properties:
+                  decode:
+                    type: string
+                  prefill:
+                    type: string
+                  scheduler:
+                    type: string
+                required:
+                - decode
+                - prefill
+                - scheduler
+                type: object
+            required:
+            - engineConfig
+            - images
+            type: object
+          status:
+            description: PDEngineProfileStatus defines the observed state of PDEngineProfile.
+            type: object
+        type: object
+    served: true
+    storage: true

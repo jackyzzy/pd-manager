@@ -1,0 +1,353 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.2
+  name: pdinferenceservices.pdai.pdai.io
+spec:
+  group: pdai.pdai.io
+  names:
+    kind: PDInferenceService
+    listKind: PDInferenceServiceList
+    plural: pdinferenceservices
+    shortNames:
+    - pdis
+    singular: pdinferenceservice
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.endpoint
+      name: Endpoint
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: PDInferenceService is the Schema for the pdinferenceservices
+          API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: PDInferenceServiceSpec defines the desired state of PDInferenceService.
+            properties:
+              decode:
+                description: Decode configures the decode role.
+                properties:
+                  replicas:
+                    format: int32
+                    maximum: 100
+                    minimum: 1
+                    type: integer
+                  resources:
+                    description: ResourceSpec defines compute resources for a role.
+                    properties:
+                      gpu:
+                        description: GPU is the number of GPU cards (e.g. "1", "4").
+                        type: string
+                      gpuType:
+                        description: GPUType optionally constrains the GPU model (e.g.
+                          "A30", "H100").
+                        type: string
+                    required:
+                    - gpu
+                    type: object
+                required:
+                - replicas
+                - resources
+                type: object
+              engine:
+                default: sglang
+                description: Engine selects the inference engine. Defaults to sglang.
+                enum:
+                - sglang
+                type: string
+              engineConfig:
+                description: EngineConfig provides inline engine configuration that
+                  overrides the profile.
+                properties:
+                  extraArgs:
+                    description: RoleExtraArgs holds per-role extra arguments to pass
+                      to the inference engine.
+                    properties:
+                      decode:
+                        items:
+                          type: string
+                        type: array
+                      prefill:
+                        items:
+                          type: string
+                        type: array
+                      scheduler:
+                        items:
+                          type: string
+                        type: array
+                    type: object
+                  kvTransfer:
+                    description: KVTransfer configures the KV cache transfer between
+                      prefill and decode.
+                    properties:
+                      backend:
+                        allOf:
+                        - enum:
+                          - mooncake
+                          - nixl
+                          - nccl
+                        - enum:
+                          - mooncake
+                          - nixl
+                          - nccl
+                        description: Backend is the KV transfer backend.
+                        type: string
+                    required:
+                    - backend
+                    type: object
+                  tensorParallelSize:
+                    format: int32
+                    type: integer
+                type: object
+              engineProfileRef:
+                description: |-
+                  EngineProfileRef names a PDEngineProfile in the pd-system namespace
+                  to use as the base engine configuration template.
+                type: string
+              images:
+                description: |-
+                  Images specifies the container images for each role.
+                  Required when engineProfileRef is not set.
+                properties:
+                  decode:
+                    type: string
+                  prefill:
+                    type: string
+                  scheduler:
+                    type: string
+                required:
+                - decode
+                - prefill
+                - scheduler
+                type: object
+              model:
+                description: Model is the logical model name (e.g. "qwen3-14b").
+                type: string
+              modelStorage:
+                description: ModelStorage describes where the model files are located.
+                properties:
+                  hostPath:
+                    description: HostPath is the node-local path to the model directory
+                      (used when type=hostPath).
+                    type: string
+                  mountPath:
+                    description: |-
+                      MountPath is where the model directory is mounted inside the container.
+                      Defaults to /models.
+                    type: string
+                  pvcName:
+                    description: PVCName is the PVC name (used when type=pvc).
+                    type: string
+                  type:
+                    description: 'Type is the storage type: hostPath or pvc.'
+                    type: string
+                required:
+                - type
+                type: object
+              pdRatio:
+                description: |-
+                  PDRatio is the desired prefill:decode ratio (e.g. "1:2").
+                  Mutually exclusive with scaling.prefill.
+                type: string
+              prefill:
+                description: Prefill configures the prefill role.
+                properties:
+                  replicas:
+                    format: int32
+                    maximum: 100
+                    minimum: 1
+                    type: integer
+                  resources:
+                    description: ResourceSpec defines compute resources for a role.
+                    properties:
+                      gpu:
+                        description: GPU is the number of GPU cards (e.g. "1", "4").
+                        type: string
+                      gpuType:
+                        description: GPUType optionally constrains the GPU model (e.g.
+                          "A30", "H100").
+                        type: string
+                    required:
+                    - gpu
+                    type: object
+                required:
+                - replicas
+                - resources
+                type: object
+              router:
+                description: Router configures the sgl-router scheduler.
+                properties:
+                  strategy:
+                    description: Strategy is the routing strategy.
+                    type: string
+                type: object
+              scaling:
+                description: Scaling configures HPA-based autoscaling.
+                properties:
+                  decode:
+                    description: HPASpec defines Horizontal Pod Autoscaler configuration
+                      for a role.
+                    properties:
+                      maxReplicas:
+                        format: int32
+                        type: integer
+                      minReplicas:
+                        format: int32
+                        type: integer
+                    required:
+                    - maxReplicas
+                    type: object
+                  prefill:
+                    description: HPASpec defines Horizontal Pod Autoscaler configuration
+                      for a role.
+                    properties:
+                      maxReplicas:
+                        format: int32
+                        type: integer
+                      minReplicas:
+                        format: int32
+                        type: integer
+                    required:
+                    - maxReplicas
+                    type: object
+                type: object
+            required:
+            - decode
+            - model
+            - modelStorage
+            - prefill
+            type: object
+          status:
+            description: PDInferenceServiceStatus defines the observed state of PDInferenceService.
+            properties:
+              conditions:
+                description: Conditions holds standard Kubernetes condition objects.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              endpoint:
+                description: Endpoint is the address where inference requests can
+                  be sent.
+                type: string
+              lastEvent:
+                description: LastEvent records the most recent notable event.
+                properties:
+                  message:
+                    type: string
+                  reason:
+                    type: string
+                type: object
+              phase:
+                description: Phase is the current lifecycle phase.
+                enum:
+                - Pending
+                - Initializing
+                - Running
+                - Failed
+                - Terminating
+                type: string
+              roleStatuses:
+                description: RoleStatuses reports readiness per role.
+                items:
+                  description: RoleStatus reports the observed state of a single role.
+                  properties:
+                    name:
+                      type: string
+                    ready:
+                      format: int32
+                      type: integer
+                    total:
+                      format: int32
+                      type: integer
+                  required:
+                  - name
+                  - ready
+                  - total
+                  type: object
+                type: array
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
