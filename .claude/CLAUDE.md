@@ -109,6 +109,7 @@ a30环境：
 地址：183.56.181.9
 端口：34451
 用户名：a30
+a30为单节点环境，既有docker，又有基于containerd的k8s，两者相互隔离
 可以免密码登录
 
 ## Key Reference Files

@@ -8,7 +8,8 @@
       "Bash(gh auth status)",
       "Bash(echo $GITHUB_TOKEN)",
       "Bash(env)",
-      "Bash(printf \"protocol=https\\\\nhost=github.com\\\\n\")"
+      "Bash(printf \"protocol=https\\\\nhost=github.com\\\\n\")",
+      "Bash(rsync -avz --progress -e \"ssh -p 34451\" --exclude='.git' --exclude='bin/' --exclude='coverage.out' --exclude='coverage.html' /home/zzy/code/pd-manager/ a30@183.56.181.9:/home/a30/rbg-deployment/pd-manager/)"
     ]
   }
 }
