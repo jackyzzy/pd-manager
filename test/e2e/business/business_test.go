@@ -325,9 +325,10 @@ func podContainerState(podName, namespace string) string {
 }
 
 // getPodsForRole returns pod names for a given role label in the namespace.
+// RBG v0.5+ labels pods with "rolebasedgroup.workloads.x-k8s.io/role=<role>".
 func getPodsForRole(role, namespace string) []string {
 	out, err := kubectl("get", "pods", "-n", namespace,
-		"-l", "workloads.x-k8s.io/role-name="+role,
+		"-l", "rolebasedgroup.workloads.x-k8s.io/role="+role,
 		"-o", "jsonpath={.items[*].metadata.name}")
 	if err != nil || strings.TrimSpace(out) == "" {
 		return nil
