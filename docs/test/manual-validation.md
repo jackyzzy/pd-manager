@@ -23,16 +23,37 @@
 
 > **注意**：a30 无公网访问，使用 vendor 模式构建，通过 containerd 直接导入镜像（不走 Registry）。
 
-### 1. WSL 同步代码到 a30
+### 1. 获取代码到 a30
+
+**方式 A（推荐）：直接从 GitHub 克隆**
 
 ```bash
-# 在 WSL 中同步源码（vendor 目录需同步，a30 无法访问 proxy.golang.org）
+# 在 a30 上
+mkdir -p /home/a30/rbg-deployment
+cd /home/a30/rbg-deployment
+
+# 克隆 pd-manager（含 vendor 目录，无需额外下载依赖）
+git clone https://github.com/jackyzzy/pd-manager.git pd-manager
+
+# 克隆 rbg 本地模块（go.mod replace 依赖）
+# 将 <rbg-repo-url> 替换为实际地址
+git clone <rbg-repo-url> rbg
+
+# 后续更新时在各目录执行 git pull 即可
+```
+
+> **注意**：若 vendor/ 已提交到 git，克隆后无需再运行 `go mod vendor`。
+
+**方式 B（备选）：从 WSL rsync**
+
+```bash
+# 在 WSL 中执行（a30 无法访问 proxy.golang.org 时，需同步 vendor 目录）
 rsync -avz --exclude='.git' --exclude='bin/' \
   /home/zzy/code/pd-manager/ \
   a30@183.56.181.9:/home/a30/rbg-deployment/pd-manager/ \
   -e "ssh -p 34451"
 
-# 同步 rbg 本地模块（go.mod replace 依赖）
+# 同步 rbg 本地模块
 rsync -avz --exclude='.git' \
   /home/zzy/code/rbg/ \
   a30@183.56.181.9:/home/a30/rbg-deployment/rbg/ \
@@ -45,10 +66,12 @@ rsync -avz --exclude='.git' \
 # 在 a30 上
 cd /home/a30/rbg-deployment/pd-manager
 
-# 修复 vendor/modules.txt 中的本地路径（每次 rsync 后需执行）
-sed -i 's|=> /home/zzy/code/rbg|=> ../rbg|g' vendor/modules.txt
+# ── 若使用方式 B（rsync）且有 vendor 目录，需修复本地路径 ──────────────────────
+# sed -i 's|=> /home/zzy/code/rbg|=> ../rbg|g' vendor/modules.txt
+# ── 若使用方式 A（git clone）且 Dockerfile 走联网模式，跳过此步 ──────────────
 
-# 构建镜像（使用 --network=host 绕过 iptables 问题）
+# 构建镜像（--network=host 绕过 iptables 问题）
+# 若 a30 无法访问 proxy.golang.org，需在 Dockerfile 中切换为 vendor 模式（见 Dockerfile 注释）
 docker build --network=host -t pd-manager:v0.0.1 .
 
 # 导入到 containerd（k8s.io 命名空间）
