@@ -106,7 +106,11 @@ kubectl rollout status deploy/pd-manager-controller-manager -n pd-manager-system
 
 ### US-01：创建推理服务
 
-**目标**：创建一个完整的 PD 推理服务，三个角色（scheduler/prefill/decode）Pod 就绪。
+**目标**：创建一个完整的 PD 推理服务，三个角色（scheduler/prefill/decode）Pod 就绪。支持两种创建方式。
+
+---
+
+#### 方式 A：kubectl apply（运维人员）
 
 ```bash
 # 1. 创建 PDInferenceService
@@ -183,7 +187,62 @@ kubectl get pdis qwen3-14b -w
 kubectl wait pdis qwen3-14b --for=jsonpath='.status.phase'=Running --timeout=30m
 ```
 
-**预期结果**：
+---
+
+#### 方式 B：REST API POST（前端页面 / 程序调用）
+
+> 前置：先 port-forward pd-manager 到本地（见 US-02）。
+
+```bash
+# port-forward pd-manager API 服务
+PD_POD=$(kubectl get pod -n pd-manager-system -l control-plane=controller-manager -o jsonpath='{.items[0].metadata.name}')
+kubectl port-forward -n pd-manager-system pod/${PD_POD} 8080:8080 &
+sleep 2
+
+# POST 创建推理服务
+curl -s -X POST http://localhost:8080/api/v1/pd-inference-services \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "metadata": {
+      "name": "qwen3-14b",
+      "namespace": "default"
+    },
+    "spec": {
+      "model": "Qwen/Qwen3-14B",
+      "modelStorage": {
+        "type": "hostPath",
+        "hostPath": "/data/model/qwen3-14b",
+        "mountPath": "/models"
+      },
+      "images": {
+        "scheduler": "lmsysorg/sgl-model-gateway:v0.3.1",
+        "prefill":   "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime",
+        "decode":    "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime"
+      },
+      "prefill": {"replicas": 1, "resources": {"gpu": "2", "gpuType": "a30"}},
+      "decode":  {"replicas": 1, "resources": {"gpu": "2", "gpuType": "a30"}},
+      "router": {"strategy": "round-robin"},
+      "engineConfig": {
+        "tensorParallelSize": 2,
+        "kvTransfer": {"backend": "nixl"},
+        "extraArgs": {
+          "prefill":   ["--trust-remote-code","--disable-radix-cache","--mem-fraction-static","0.88","--chunked-prefill-size","8192","--page-size","128","--cuda-graph-max-bs","256"],
+          "decode":    ["--trust-remote-code","--disable-radix-cache","--mem-fraction-static","0.88","--chunked-prefill-size","8192","--page-size","128","--cuda-graph-max-bs","256"],
+          "scheduler": ["--health-check-timeout-secs","6000000","--health-check-interval-secs","6000","--worker-startup-timeout-secs","3600","--worker-startup-check-interval","30"]
+        }
+      }
+    }
+  }' | python3 -m json.tool
+
+# 期望：HTTP 201，响应体包含创建后的资源（含 metadata.name）
+
+# 查询创建结果
+curl -s http://localhost:8080/api/v1/pd-inference-services/qwen3-14b | python3 -m json.tool
+```
+
+---
+
+**预期结果（两种方式相同）**：
 - PDInferenceService 创建成功，Phase 在 30s 内变为 Initializing
 - RBG 被自动创建：`kubectl get rbg qwen3-14b`
 - 6 个 Pod（scheduler×1、prefill×1、decode×1，每个各 2 GPU）启动后 Phase 变为 Running
@@ -360,7 +419,8 @@ kubectl get pdis,rbg --all-namespaces
 
 | 用例 | 验收标准 | 通过 |
 |------|---------|------|
-| US-01 | PDInferenceService 创建后 RBG 自动创建，Phase 变为 Running | ☐ |
+| US-01 | kubectl apply 创建 PDIS，RBG 自动创建，Phase 变为 Running | ☐ |
+| US-01 | REST API POST 创建 PDIS，返回 201，资源正常创建 | ☐ |
 | US-01 | 三个角色（scheduler/prefill/decode）Pod 均 Running | ☐ |
 | US-02 | kubectl 查询 phase=Running，endpoint 有值 | ☐ |
 | US-02 | REST API GET 返回 200，包含完整 status | ☐ |
