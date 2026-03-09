@@ -30,3 +30,15 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - workloads.x-k8s.io
+  resources:
+  - rolebasedgroups
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch

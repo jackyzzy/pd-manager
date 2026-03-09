@@ -26,11 +26,10 @@ import (
 func TestPDEngineProfileSpec_Images_Required(t *testing.T) {
 	spec := PDEngineProfileSpec{
 		Images: RoleImages{
-			Scheduler: "sgl-router:v0.3.1",
-			Prefill:   "sglang:v0.5.8",
-			Decode:    "sglang:v0.5.8",
+			Router:  "sgl-router:v0.3.1",
+			Prefill: "sglang:v0.5.8",
+			Decode:  "sglang:v0.5.8",
 		},
-		EngineConfig: EngineConfig{},
 	}
 
 	data, err := json.Marshal(spec)
@@ -51,8 +50,8 @@ func TestPDEngineProfileSpec_Images_Required(t *testing.T) {
 	if !ok {
 		t.Fatal("images must be an object")
 	}
-	if imagesMap["scheduler"] != "sgl-router:v0.3.1" {
-		t.Errorf("images.scheduler mismatch: %v", imagesMap["scheduler"])
+	if imagesMap["router"] != "sgl-router:v0.3.1" {
+		t.Errorf("images.router mismatch: %v", imagesMap["router"])
 	}
 }
 
@@ -61,11 +60,10 @@ func TestPDEngineProfileSpec_Images_Required(t *testing.T) {
 func TestApplicabilitySpec_Optional(t *testing.T) {
 	spec := PDEngineProfileSpec{
 		Images: RoleImages{
-			Scheduler: "sgl-router:latest",
-			Prefill:   "sglang:latest",
-			Decode:    "sglang:latest",
+			Router:  "sgl-router:latest",
+			Prefill: "sglang:latest",
+			Decode:  "sglang:latest",
 		},
-		EngineConfig: EngineConfig{},
 		// Applicability is nil
 	}
 
@@ -84,41 +82,35 @@ func TestApplicabilitySpec_Optional(t *testing.T) {
 	}
 }
 
-// TestEngineConfig_ExtraArgs_AllRoles verifies that EngineConfig.ExtraArgs supports
-// independent per-role string slices.
-func TestEngineConfig_ExtraArgs_AllRoles(t *testing.T) {
-	cfg := EngineConfig{
-		ExtraArgs: &RoleExtraArgs{
-			Prefill:   []string{"--mem-fraction-static=0.8", "--tp-size=2"},
-			Decode:    []string{"--decode-log-interval=100"},
-			Scheduler: []string{"--policy=cache-aware"},
-		},
+// TestRoleArgs_AllRoles verifies that RoleArgs supports independent per-role string slices.
+func TestRoleArgs_AllRoles(t *testing.T) {
+	args := RoleArgs{
+		Router:  []string{"--host", "0.0.0.0", "--port", "8000"},
+		Prefill: []string{"--disaggregation-mode", "prefill", "--tp-size", "2"},
+		Decode:  []string{"--disaggregation-mode", "decode", "--tp-size", "2"},
 	}
 
-	data, err := json.Marshal(cfg)
+	data, err := json.Marshal(args)
 	if err != nil {
 		t.Fatalf("marshal failed: %v", err)
 	}
 
-	var decoded EngineConfig
+	var decoded RoleArgs
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatalf("unmarshal failed: %v", err)
 	}
 
-	if decoded.ExtraArgs == nil {
-		t.Fatal("ExtraArgs should not be nil")
+	if len(decoded.Router) != 4 {
+		t.Errorf("Router args: want 4, got %d", len(decoded.Router))
 	}
-	if len(decoded.ExtraArgs.Prefill) != 2 {
-		t.Errorf("Prefill extra args: want 2, got %d", len(decoded.ExtraArgs.Prefill))
+	if decoded.Router[0] != "--host" {
+		t.Errorf("Router[0] mismatch: %v", decoded.Router[0])
 	}
-	if decoded.ExtraArgs.Prefill[0] != "--mem-fraction-static=0.8" {
-		t.Errorf("Prefill[0] mismatch: %v", decoded.ExtraArgs.Prefill[0])
+	if len(decoded.Prefill) != 4 {
+		t.Errorf("Prefill args: want 4, got %d", len(decoded.Prefill))
 	}
-	if len(decoded.ExtraArgs.Decode) != 1 {
-		t.Errorf("Decode extra args: want 1, got %d", len(decoded.ExtraArgs.Decode))
-	}
-	if len(decoded.ExtraArgs.Scheduler) != 1 {
-		t.Errorf("Scheduler extra args: want 1, got %d", len(decoded.ExtraArgs.Scheduler))
+	if len(decoded.Decode) != 4 {
+		t.Errorf("Decode args: want 4, got %d", len(decoded.Decode))
 	}
 }
 

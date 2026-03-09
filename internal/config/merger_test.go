@@ -35,62 +35,69 @@ func newScheme() *runtime.Scheme {
 	return s
 }
 
-func ptr[T any](v T) *T { return &v }
-
 // TestMerge_NoProfile verifies that when no engineProfileRef is set,
-// MergedConfig comes directly from the inline engineConfig.
+// MergedConfig comes directly from inline role fields.
 func TestMerge_NoProfile(t *testing.T) {
 	pdis := &v1alpha1.PDInferenceService{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
 		Spec: v1alpha1.PDInferenceServiceSpec{
 			Model: "qwen3-14b",
-			Images: &v1alpha1.RoleImages{
-				Scheduler: "sgl-router:latest",
-				Prefill:   "sglang:latest",
-				Decode:    "sglang:latest",
+			Router: v1alpha1.RouterRoleSpec{
+				Image: "sgl-router:latest",
+				Args:  []string{"--host", "0.0.0.0"},
 			},
-			EngineConfig: &v1alpha1.EngineConfig{
-				TensorParallelSize: ptr(int32(4)),
+			Prefill: v1alpha1.InferenceRoleSpec{
+				Image: "sglang:latest",
+				Args:  []string{"--disaggregation-mode", "prefill"},
+			},
+			Decode: v1alpha1.InferenceRoleSpec{
+				Image: "sglang:latest",
+				Args:  []string{"--disaggregation-mode", "decode"},
 			},
 		},
 	}
 
 	cl := fake.NewClientBuilder().WithScheme(newScheme()).Build()
-	merger := config.NewMerger(cl)
-	merged, err := merger.Resolve(context.Background(), pdis)
+	merged, err := config.NewMerger(cl).Resolve(context.Background(), pdis)
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
 	}
 
-	if merged.TensorParallelSize == nil || *merged.TensorParallelSize != 4 {
-		t.Errorf("TensorParallelSize mismatch: %v", merged.TensorParallelSize)
+	if merged.Images.Router != "sgl-router:latest" {
+		t.Errorf("Images.Router mismatch: %v", merged.Images.Router)
 	}
 	if merged.Images.Prefill != "sglang:latest" {
 		t.Errorf("Images.Prefill mismatch: %v", merged.Images.Prefill)
 	}
+	if len(merged.RouterArgs) != 2 || merged.RouterArgs[0] != "--host" {
+		t.Errorf("RouterArgs mismatch: %v", merged.RouterArgs)
+	}
+	if len(merged.PrefillArgs) != 2 {
+		t.Errorf("PrefillArgs mismatch: %v", merged.PrefillArgs)
+	}
 }
 
 // TestMerge_ProfileOnly verifies that when only a Profile is set and no inline config,
-// MergedConfig equals the Profile configuration.
+// MergedConfig equals the Profile configuration (images + args).
 func TestMerge_ProfileOnly(t *testing.T) {
 	profile := &v1alpha1.PDEngineProfile{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "a30-profile",
-			Namespace: "pd-system",
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: "a30-profile", Namespace: "default"},
 		Spec: v1alpha1.PDEngineProfileSpec{
 			Images: v1alpha1.RoleImages{
-				Scheduler: "sgl-router:profile",
-				Prefill:   "sglang:profile",
-				Decode:    "sglang:profile",
+				Router:  "sgl-router:profile",
+				Prefill: "sglang:profile",
+				Decode:  "sglang:profile",
 			},
-			EngineConfig: v1alpha1.EngineConfig{
-				TensorParallelSize: ptr(int32(2)),
-				KVTransfer:         &v1alpha1.KVTransfer{Backend: v1alpha1.KVBackendMooncake},
+			RoleArgs: &v1alpha1.RoleArgs{
+				Router:  []string{"--from-profile-router"},
+				Prefill: []string{"--from-profile-prefill"},
+				Decode:  []string{"--from-profile-decode"},
 			},
 		},
 	}
 
 	pdis := &v1alpha1.PDInferenceService{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
 		Spec: v1alpha1.PDInferenceServiceSpec{
 			Model:            "qwen3-14b",
 			EngineProfileRef: "a30-profile",
@@ -98,41 +105,44 @@ func TestMerge_ProfileOnly(t *testing.T) {
 	}
 
 	cl := fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(profile).Build()
-	merger := config.NewMerger(cl)
-	merged, err := merger.Resolve(context.Background(), pdis)
+	merged, err := config.NewMerger(cl).Resolve(context.Background(), pdis)
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
 	}
 
-	if merged.TensorParallelSize == nil || *merged.TensorParallelSize != 2 {
-		t.Errorf("TensorParallelSize mismatch: %v", merged.TensorParallelSize)
-	}
-	if merged.KVTransfer == nil || merged.KVTransfer.Backend != v1alpha1.KVBackendMooncake {
-		t.Errorf("KVTransfer mismatch: %v", merged.KVTransfer)
-	}
 	if merged.Images.Prefill != "sglang:profile" {
-		t.Errorf("Images.Prefill mismatch: %v", merged.Images.Prefill)
+		t.Errorf("Images.Prefill should come from profile, got %v", merged.Images.Prefill)
+	}
+	if len(merged.RouterArgs) != 1 || merged.RouterArgs[0] != "--from-profile-router" {
+		t.Errorf("RouterArgs should come from profile, got %v", merged.RouterArgs)
+	}
+	if len(merged.PrefillArgs) != 1 || merged.PrefillArgs[0] != "--from-profile-prefill" {
+		t.Errorf("PrefillArgs should come from profile, got %v", merged.PrefillArgs)
+	}
+	if len(merged.DecodeArgs) != 1 || merged.DecodeArgs[0] != "--from-profile-decode" {
+		t.Errorf("DecodeArgs should come from profile, got %v", merged.DecodeArgs)
 	}
 }
 
-// TestMerge_InlineOverridesStructuredFields verifies that inline engineConfig
-// TensorParallelSize overrides the Profile value.
-func TestMerge_InlineOverridesStructuredFields(t *testing.T) {
+// TestMerge_InlineArgsOverrideProfile verifies that non-empty inline args
+// completely override profile args (no concatenation).
+func TestMerge_InlineArgsOverrideProfile(t *testing.T) {
 	profile := &v1alpha1.PDEngineProfile{
-		ObjectMeta: metav1.ObjectMeta{Name: "base-profile", Namespace: "pd-system"},
+		ObjectMeta: metav1.ObjectMeta{Name: "base-profile", Namespace: "default"},
 		Spec: v1alpha1.PDEngineProfileSpec{
-			Images: v1alpha1.RoleImages{Scheduler: "s", Prefill: "p", Decode: "d"},
-			EngineConfig: v1alpha1.EngineConfig{
-				TensorParallelSize: ptr(int32(2)),
+			Images: v1alpha1.RoleImages{Router: "s", Prefill: "p", Decode: "d"},
+			RoleArgs: &v1alpha1.RoleArgs{
+				Prefill: []string{"--from-profile"},
 			},
 		},
 	}
 
 	pdis := &v1alpha1.PDInferenceService{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
 		Spec: v1alpha1.PDInferenceServiceSpec{
 			EngineProfileRef: "base-profile",
-			EngineConfig: &v1alpha1.EngineConfig{
-				TensorParallelSize: ptr(int32(8)), // override
+			Prefill: v1alpha1.InferenceRoleSpec{
+				Args: []string{"--from-inline"},
 			},
 		},
 	}
@@ -143,109 +153,30 @@ func TestMerge_InlineOverridesStructuredFields(t *testing.T) {
 		t.Fatalf("Resolve failed: %v", err)
 	}
 
-	if merged.TensorParallelSize == nil || *merged.TensorParallelSize != 8 {
-		t.Errorf("expected TensorParallelSize=8 (inline wins), got %v", merged.TensorParallelSize)
+	if len(merged.PrefillArgs) != 1 || merged.PrefillArgs[0] != "--from-inline" {
+		t.Errorf("expected inline args to win completely, got %v", merged.PrefillArgs)
 	}
 }
 
-// TestMerge_InlineOverridesKVTransfer verifies that inline kvTransfer.backend
-// overrides the Profile's kvTransfer.backend.
-func TestMerge_InlineOverridesKVTransfer(t *testing.T) {
+// TestMerge_InlineImageOverridesProfile verifies that inline image overrides profile
+// for that role while other roles inherit from profile.
+func TestMerge_InlineImageOverridesProfile(t *testing.T) {
 	profile := &v1alpha1.PDEngineProfile{
-		ObjectMeta: metav1.ObjectMeta{Name: "base-profile", Namespace: "pd-system"},
-		Spec: v1alpha1.PDEngineProfileSpec{
-			Images: v1alpha1.RoleImages{Scheduler: "s", Prefill: "p", Decode: "d"},
-			EngineConfig: v1alpha1.EngineConfig{
-				KVTransfer: &v1alpha1.KVTransfer{Backend: v1alpha1.KVBackendMooncake},
-			},
-		},
-	}
-
-	pdis := &v1alpha1.PDInferenceService{
-		Spec: v1alpha1.PDInferenceServiceSpec{
-			EngineProfileRef: "base-profile",
-			EngineConfig: &v1alpha1.EngineConfig{
-				KVTransfer: &v1alpha1.KVTransfer{Backend: v1alpha1.KVBackendNixl}, // override
-			},
-		},
-	}
-
-	cl := fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(profile).Build()
-	merged, err := config.NewMerger(cl).Resolve(context.Background(), pdis)
-	if err != nil {
-		t.Fatalf("Resolve failed: %v", err)
-	}
-
-	if merged.KVTransfer == nil || merged.KVTransfer.Backend != v1alpha1.KVBackendNixl {
-		t.Errorf("expected KVBackendNixl (inline wins), got %v", merged.KVTransfer)
-	}
-}
-
-// TestMerge_ExtraArgs_Appended verifies that extraArgs from Profile and inline
-// are concatenated in order: Profile first, inline last.
-func TestMerge_ExtraArgs_Appended(t *testing.T) {
-	profile := &v1alpha1.PDEngineProfile{
-		ObjectMeta: metav1.ObjectMeta{Name: "base-profile", Namespace: "pd-system"},
-		Spec: v1alpha1.PDEngineProfileSpec{
-			Images: v1alpha1.RoleImages{Scheduler: "s", Prefill: "p", Decode: "d"},
-			EngineConfig: v1alpha1.EngineConfig{
-				ExtraArgs: &v1alpha1.RoleExtraArgs{
-					Prefill: []string{"--from-profile"},
-				},
-			},
-		},
-	}
-
-	pdis := &v1alpha1.PDInferenceService{
-		Spec: v1alpha1.PDInferenceServiceSpec{
-			EngineProfileRef: "base-profile",
-			EngineConfig: &v1alpha1.EngineConfig{
-				ExtraArgs: &v1alpha1.RoleExtraArgs{
-					Prefill: []string{"--from-inline"},
-				},
-			},
-		},
-	}
-
-	cl := fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(profile).Build()
-	merged, err := config.NewMerger(cl).Resolve(context.Background(), pdis)
-	if err != nil {
-		t.Fatalf("Resolve failed: %v", err)
-	}
-
-	if len(merged.ExtraArgs.Prefill) != 2 {
-		t.Fatalf("expected 2 prefill extra args, got %d", len(merged.ExtraArgs.Prefill))
-	}
-	if merged.ExtraArgs.Prefill[0] != "--from-profile" {
-		t.Errorf("first arg should be from profile, got %v", merged.ExtraArgs.Prefill[0])
-	}
-	if merged.ExtraArgs.Prefill[1] != "--from-inline" {
-		t.Errorf("second arg should be from inline, got %v", merged.ExtraArgs.Prefill[1])
-	}
-}
-
-// TestMerge_InlineImages_PartialOverride verifies that when inline spec.images
-// only specifies decode, scheduler and prefill are inherited from the Profile.
-func TestMerge_InlineImages_PartialOverride(t *testing.T) {
-	profile := &v1alpha1.PDEngineProfile{
-		ObjectMeta: metav1.ObjectMeta{Name: "base-profile", Namespace: "pd-system"},
+		ObjectMeta: metav1.ObjectMeta{Name: "base-profile", Namespace: "default"},
 		Spec: v1alpha1.PDEngineProfileSpec{
 			Images: v1alpha1.RoleImages{
-				Scheduler: "sgl-router:profile",
-				Prefill:   "sglang:profile-prefill",
-				Decode:    "sglang:profile-decode",
+				Router:  "sgl-router:profile",
+				Prefill: "sglang:profile-prefill",
+				Decode:  "sglang:profile-decode",
 			},
-			EngineConfig: v1alpha1.EngineConfig{},
 		},
 	}
 
 	pdis := &v1alpha1.PDInferenceService{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
 		Spec: v1alpha1.PDInferenceServiceSpec{
 			EngineProfileRef: "base-profile",
-			Images: &v1alpha1.RoleImages{
-				// Only override decode; scheduler and prefill should come from profile.
-				Decode: "sglang:custom-decode",
-			},
+			Decode:           v1alpha1.InferenceRoleSpec{Image: "sglang:custom-decode"},
 		},
 	}
 
@@ -255,8 +186,8 @@ func TestMerge_InlineImages_PartialOverride(t *testing.T) {
 		t.Fatalf("Resolve failed: %v", err)
 	}
 
-	if merged.Images.Scheduler != "sgl-router:profile" {
-		t.Errorf("Scheduler should inherit from profile, got %v", merged.Images.Scheduler)
+	if merged.Images.Router != "sgl-router:profile" {
+		t.Errorf("Router should inherit from profile, got %v", merged.Images.Router)
 	}
 	if merged.Images.Prefill != "sglang:profile-prefill" {
 		t.Errorf("Prefill should inherit from profile, got %v", merged.Images.Prefill)
@@ -266,29 +197,39 @@ func TestMerge_InlineImages_PartialOverride(t *testing.T) {
 	}
 }
 
-// TestMerge_ExtraArgs_SameKey_InlineLast verifies that when both Profile and inline
-// have the same flag key, both are present and inline appears last (SGLang uses last).
-func TestMerge_ExtraArgs_SameKey_InlineLast(t *testing.T) {
+// TestMerge_ProfileNotFound verifies that referencing a non-existent profile returns an error.
+func TestMerge_ProfileNotFound(t *testing.T) {
+	pdis := &v1alpha1.PDInferenceService{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+		Spec: v1alpha1.PDInferenceServiceSpec{
+			EngineProfileRef: "nonexistent-profile",
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+	_, err := config.NewMerger(cl).Resolve(context.Background(), pdis)
+	if err == nil {
+		t.Error("expected error for non-existent profile, got nil")
+	}
+}
+
+// TestMerge_EngineRuntimes_FromProfile verifies that EngineRuntimes from the profile
+// are propagated to the MergedConfig.
+func TestMerge_EngineRuntimes_FromProfile(t *testing.T) {
 	profile := &v1alpha1.PDEngineProfile{
-		ObjectMeta: metav1.ObjectMeta{Name: "base-profile", Namespace: "pd-system"},
+		ObjectMeta: metav1.ObjectMeta{Name: "base-profile", Namespace: "default"},
 		Spec: v1alpha1.PDEngineProfileSpec{
-			Images: v1alpha1.RoleImages{Scheduler: "s", Prefill: "p", Decode: "d"},
-			EngineConfig: v1alpha1.EngineConfig{
-				ExtraArgs: &v1alpha1.RoleExtraArgs{
-					Prefill: []string{"--mem-fraction-static=0.88"},
-				},
+			Images: v1alpha1.RoleImages{Router: "s", Prefill: "p", Decode: "d"},
+			EngineRuntimes: &v1alpha1.RoleEngineRuntimes{
+				Prefill: []v1alpha1.EngineRuntime{{ProfileName: "a30-runtime"}},
 			},
 		},
 	}
 
 	pdis := &v1alpha1.PDInferenceService{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
 		Spec: v1alpha1.PDInferenceServiceSpec{
 			EngineProfileRef: "base-profile",
-			EngineConfig: &v1alpha1.EngineConfig{
-				ExtraArgs: &v1alpha1.RoleExtraArgs{
-					Prefill: []string{"--mem-fraction-static=0.95"},
-				},
-			},
 		},
 	}
 
@@ -298,14 +239,13 @@ func TestMerge_ExtraArgs_SameKey_InlineLast(t *testing.T) {
 		t.Fatalf("Resolve failed: %v", err)
 	}
 
-	if len(merged.ExtraArgs.Prefill) != 2 {
-		t.Fatalf("expected 2 args (both present), got %d", len(merged.ExtraArgs.Prefill))
+	if merged.EngineRuntimes == nil {
+		t.Fatal("EngineRuntimes should not be nil")
 	}
-	// Profile first, inline last — SGLang uses the last occurrence
-	if merged.ExtraArgs.Prefill[0] != "--mem-fraction-static=0.88" {
-		t.Errorf("first should be profile value, got %v", merged.ExtraArgs.Prefill[0])
+	if len(merged.EngineRuntimes.Prefill) != 1 {
+		t.Fatalf("expected 1 prefill runtime, got %d", len(merged.EngineRuntimes.Prefill))
 	}
-	if merged.ExtraArgs.Prefill[1] != "--mem-fraction-static=0.95" {
-		t.Errorf("second should be inline value, got %v", merged.ExtraArgs.Prefill[1])
+	if merged.EngineRuntimes.Prefill[0].ProfileName != "a30-runtime" {
+		t.Errorf("runtime ProfileName mismatch: %v", merged.EngineRuntimes.Prefill[0].ProfileName)
 	}
 }

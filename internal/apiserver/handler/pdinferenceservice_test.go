@@ -54,17 +54,23 @@ func makePDIS(name string) *pdaiv1alpha1.PDInferenceService {
 		},
 		Spec: pdaiv1alpha1.PDInferenceServiceSpec{
 			Model: "qwen3-14b",
-			ModelStorage: pdaiv1alpha1.ModelStorageSpec{
-				Type:     pdaiv1alpha1.StorageTypeHostPath,
-				HostPath: "/data/models",
+			Router: pdaiv1alpha1.RouterRoleSpec{
+				Image:    "sgl-router:latest",
+				Replicas: 1,
+				Args:     []string{"--host", "0.0.0.0"},
 			},
-			Images: &pdaiv1alpha1.RoleImages{
-				Scheduler: "sgl-router:latest",
-				Prefill:   "sglang:latest",
-				Decode:    "sglang:latest",
+			Prefill: pdaiv1alpha1.InferenceRoleSpec{
+				Image:    "sglang:latest",
+				Replicas: 1,
+				GPU:      "1",
+				Args:     []string{"--disaggregation-mode", "prefill"},
 			},
-			Prefill: pdaiv1alpha1.RoleSpec{Replicas: 1, Resources: pdaiv1alpha1.ResourceSpec{GPU: "1"}},
-			Decode:  pdaiv1alpha1.RoleSpec{Replicas: 1, Resources: pdaiv1alpha1.ResourceSpec{GPU: "1"}},
+			Decode: pdaiv1alpha1.InferenceRoleSpec{
+				Image:    "sglang:latest",
+				Replicas: 1,
+				GPU:      "1",
+				Args:     []string{"--disaggregation-mode", "decode"},
+			},
 		},
 	}
 }

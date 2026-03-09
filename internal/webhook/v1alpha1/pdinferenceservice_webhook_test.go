@@ -26,6 +26,35 @@ import (
 	pdaiv1alpha1 "github.com/pd-ai/pd-manager/api/v1alpha1"
 )
 
+func makeValidPDIS() *pdaiv1alpha1.PDInferenceService {
+	return &pdaiv1alpha1.PDInferenceService{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-svc",
+			Namespace: "default",
+		},
+		Spec: pdaiv1alpha1.PDInferenceServiceSpec{
+			Model: "qwen3-14b",
+			Router: pdaiv1alpha1.RouterRoleSpec{
+				Image:    "sgl-router:latest",
+				Replicas: 1,
+				Args:     []string{"--host", "0.0.0.0", "--port", "8000"},
+			},
+			Prefill: pdaiv1alpha1.InferenceRoleSpec{
+				Image:    "sglang:latest",
+				Replicas: 1,
+				GPU:      "1",
+				Args:     []string{"--disaggregation-mode", "prefill"},
+			},
+			Decode: pdaiv1alpha1.InferenceRoleSpec{
+				Image:    "sglang:latest",
+				Replicas: 1,
+				GPU:      "1",
+				Args:     []string{"--disaggregation-mode", "decode"},
+			},
+		},
+	}
+}
+
 var _ = Describe("PDInferenceService Webhook", func() {
 	var (
 		obj       *pdaiv1alpha1.PDInferenceService
@@ -54,108 +83,101 @@ var _ = Describe("PDInferenceService Webhook", func() {
 			Expect(string(obj.Spec.Engine)).To(Equal("sglang"))
 		})
 
-		It("TestDefault_RouterStrategy: should inject router.strategy=round-robin when router is nil", func() {
-			obj.Spec.Router = nil
+		It("TestDefault_RouterReplicas: should inject router.replicas=1 when 0", func() {
+			obj.Spec.Router.Replicas = 0
 			Expect(defaulter.Default(ctx, obj)).To(Succeed())
-			Expect(obj.Spec.Router).NotTo(BeNil())
-			Expect(string(obj.Spec.Router.Strategy)).To(Equal("round-robin"))
+			Expect(obj.Spec.Router.Replicas).To(Equal(int32(1)))
 		})
 
-		It("TestDefault_MountPath: should inject mountPath=/models when empty", func() {
-			obj.Spec.ModelStorage.MountPath = ""
+		It("TestDefault_RouterReplicas_NoOverwrite: should not overwrite existing replicas", func() {
+			obj.Spec.Router.Replicas = 3
 			Expect(defaulter.Default(ctx, obj)).To(Succeed())
-			Expect(obj.Spec.ModelStorage.MountPath).To(Equal("/models"))
+			Expect(obj.Spec.Router.Replicas).To(Equal(int32(3)))
 		})
 	})
 
 	// --- ValidateCreate Tests ---
 
 	Context("ValidateCreate", func() {
-		It("TestValidateCreate_NoProfile_MissingImages: should reject when no profileRef and no images", func() {
-			obj.Spec = pdaiv1alpha1.PDInferenceServiceSpec{
-				Model: "qwen3",
-				ModelStorage: pdaiv1alpha1.ModelStorageSpec{
-					Type:     pdaiv1alpha1.StorageTypeHostPath,
-					HostPath: "/data",
-				},
-				Prefill: pdaiv1alpha1.RoleSpec{Replicas: 1, Resources: pdaiv1alpha1.ResourceSpec{GPU: "1"}},
-				Decode:  pdaiv1alpha1.RoleSpec{Replicas: 1, Resources: pdaiv1alpha1.ResourceSpec{GPU: "1"}},
-				// No Images, no EngineProfileRef
-			}
-			_, err := validator.ValidateCreate(ctx, obj)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("images"))
+		It("TestValidateCreate_Valid: should accept a complete valid spec", func() {
+			_, err := validator.ValidateCreate(ctx, makeValidPDIS())
+			Expect(err).NotTo(HaveOccurred())
 		})
 
-		It("TestValidateCreate_InvalidKVBackend: should reject invalid KV backend", func() {
-			obj.Spec = pdaiv1alpha1.PDInferenceServiceSpec{
-				Model: "qwen3",
-				ModelStorage: pdaiv1alpha1.ModelStorageSpec{
-					Type:     pdaiv1alpha1.StorageTypeHostPath,
-					HostPath: "/data",
-				},
-				Images: &pdaiv1alpha1.RoleImages{
-					Scheduler: "s", Prefill: "p", Decode: "d",
-				},
-				Prefill: pdaiv1alpha1.RoleSpec{Replicas: 1, Resources: pdaiv1alpha1.ResourceSpec{GPU: "1"}},
-				Decode:  pdaiv1alpha1.RoleSpec{Replicas: 1, Resources: pdaiv1alpha1.ResourceSpec{GPU: "1"}},
-				EngineConfig: &pdaiv1alpha1.EngineConfig{
-					KVTransfer: &pdaiv1alpha1.KVTransfer{Backend: "invalid"},
-				},
-			}
+		It("TestValidateCreate_MissingModel: should reject when model is empty", func() {
+			obj = makeValidPDIS()
+			obj.Spec.Model = ""
 			_, err := validator.ValidateCreate(ctx, obj)
 			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("backend"))
+			Expect(err.Error()).To(ContainSubstring("model"))
 		})
 
-		It("TestValidateCreate_ProfileRef_NotFound: should reject when profileRef does not exist", func() {
-			obj.ObjectMeta = metav1.ObjectMeta{
-				Name:      "test-svc",
-				Namespace: "default",
-			}
-			obj.Spec = pdaiv1alpha1.PDInferenceServiceSpec{
-				Model: "qwen3",
-				ModelStorage: pdaiv1alpha1.ModelStorageSpec{
-					Type:     pdaiv1alpha1.StorageTypeHostPath,
-					HostPath: "/data",
-				},
-				Prefill:          pdaiv1alpha1.RoleSpec{Replicas: 1, Resources: pdaiv1alpha1.ResourceSpec{GPU: "1"}},
-				Decode:           pdaiv1alpha1.RoleSpec{Replicas: 1, Resources: pdaiv1alpha1.ResourceSpec{GPU: "1"}},
-				EngineProfileRef: "nonexistent-profile",
-			}
+		It("TestValidateCreate_MissingRouterImage: should reject when router image is missing and no profile", func() {
+			obj = makeValidPDIS()
+			obj.Spec.Router.Image = ""
 			_, err := validator.ValidateCreate(ctx, obj)
 			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("router"))
 		})
 
-		It("TestValidateCreate_PDRatio_And_PrefillScaling_Conflict: should reject pdRatio + scaling.prefill together", func() {
-			obj.Spec = pdaiv1alpha1.PDInferenceServiceSpec{
-				Model: "qwen3",
-				ModelStorage: pdaiv1alpha1.ModelStorageSpec{
-					Type:     pdaiv1alpha1.StorageTypeHostPath,
-					HostPath: "/data",
-				},
-				Images:  &pdaiv1alpha1.RoleImages{Scheduler: "s", Prefill: "p", Decode: "d"},
-				Prefill: pdaiv1alpha1.RoleSpec{Replicas: 1, Resources: pdaiv1alpha1.ResourceSpec{GPU: "1"}},
-				Decode:  pdaiv1alpha1.RoleSpec{Replicas: 1, Resources: pdaiv1alpha1.ResourceSpec{GPU: "1"}},
-				PDRatio: "1:2",
-				Scaling: &pdaiv1alpha1.ScalingSpec{
-					Prefill: &pdaiv1alpha1.HPASpec{MaxReplicas: 4},
-				},
-			}
+		It("TestValidateCreate_MissingRouterArgs: should reject when router args are missing and no profile", func() {
+			obj = makeValidPDIS()
+			obj.Spec.Router.Args = nil
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("router"))
+		})
+
+		It("TestValidateCreate_MissingPrefillArgs: should reject when prefill args are missing and no profile", func() {
+			obj = makeValidPDIS()
+			obj.Spec.Prefill.Args = nil
 			_, err := validator.ValidateCreate(ctx, obj)
 			Expect(err).To(HaveOccurred())
 		})
 
 		It("TestValidateCreate_ZeroReplicas: should reject prefill replicas=0", func() {
-			obj.Spec = pdaiv1alpha1.PDInferenceServiceSpec{
-				Model: "qwen3",
-				ModelStorage: pdaiv1alpha1.ModelStorageSpec{
-					Type:     pdaiv1alpha1.StorageTypeHostPath,
-					HostPath: "/data",
-				},
-				Images:  &pdaiv1alpha1.RoleImages{Scheduler: "s", Prefill: "p", Decode: "d"},
-				Prefill: pdaiv1alpha1.RoleSpec{Replicas: 0, Resources: pdaiv1alpha1.ResourceSpec{GPU: "1"}},
-				Decode:  pdaiv1alpha1.RoleSpec{Replicas: 1, Resources: pdaiv1alpha1.ResourceSpec{GPU: "1"}},
+			obj = makeValidPDIS()
+			obj.Spec.Prefill.Replicas = 0
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("replicas"))
+		})
+
+		It("TestValidateCreate_InvalidVolumeMount: should reject volumeMount referencing undefined volume", func() {
+			obj = makeValidPDIS()
+			obj.Spec.Prefill.VolumeMounts = []pdaiv1alpha1.VolumeMountSpec{
+				{Name: "nonexistent-vol", MountPath: "/models"},
+			}
+			// No volumes defined in spec.volumes, so this mount is invalid
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("nonexistent-vol"))
+		})
+
+		It("TestValidateCreate_ValidVolumeMount: should accept volumeMount referencing defined volume", func() {
+			obj = makeValidPDIS()
+			obj.Spec.Volumes = []pdaiv1alpha1.VolumeSpec{
+				{Name: "model-storage", HostPath: &pdaiv1alpha1.HostPathVolume{Path: "/data"}},
+			}
+			obj.Spec.Prefill.VolumeMounts = []pdaiv1alpha1.VolumeMountSpec{
+				{Name: "model-storage", MountPath: "/models"},
+			}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("TestValidateCreate_ProfileRef_NotFound: should reject when profileRef does not exist", func() {
+			obj = makeValidPDIS()
+			obj.Spec.EngineProfileRef = "nonexistent-profile"
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("TestValidateCreate_PDRatio_And_PrefillScaling_Conflict: should reject pdRatio + scaling.prefill together", func() {
+			obj = makeValidPDIS()
+			obj.Spec.PDRatio = "1:2"
+			obj.Spec.Scaling = &pdaiv1alpha1.ScalingSpec{
+				Prefill: &pdaiv1alpha1.HPASpec{MaxReplicas: 4},
 			}
 			_, err := validator.ValidateCreate(ctx, obj)
 			Expect(err).To(HaveOccurred())
@@ -166,40 +188,43 @@ var _ = Describe("PDInferenceService Webhook", func() {
 
 	Context("ValidateUpdate", func() {
 		It("TestValidateUpdate_ImmutableModel: should reject model field change", func() {
-			oldObj.Spec = pdaiv1alpha1.PDInferenceServiceSpec{
-				Model: "qwen3-14b",
-				ModelStorage: pdaiv1alpha1.ModelStorageSpec{
-					Type:     pdaiv1alpha1.StorageTypeHostPath,
-					HostPath: "/data",
-				},
-				Images:  &pdaiv1alpha1.RoleImages{Scheduler: "s", Prefill: "p", Decode: "d"},
-				Prefill: pdaiv1alpha1.RoleSpec{Replicas: 1, Resources: pdaiv1alpha1.ResourceSpec{GPU: "1"}},
-				Decode:  pdaiv1alpha1.RoleSpec{Replicas: 1, Resources: pdaiv1alpha1.ResourceSpec{GPU: "1"}},
-			}
-			obj.Spec = *oldObj.Spec.DeepCopy()
-			obj.Spec.Model = "llama-3-8b" // changed
+			oldObj = makeValidPDIS()
+			obj = makeValidPDIS()
+			obj.Spec.Model = "llama-3-8b"
 
 			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
 			Expect(err).To(HaveOccurred())
 			Expect(strings.ToLower(err.Error())).To(ContainSubstring("immutable"))
 		})
 
-		It("TestValidateUpdate_ReplicasAllowed: should allow updating replicas only", func() {
-			oldObj.Spec = pdaiv1alpha1.PDInferenceServiceSpec{
-				Model: "qwen3-14b",
-				ModelStorage: pdaiv1alpha1.ModelStorageSpec{
-					Type:     pdaiv1alpha1.StorageTypeHostPath,
-					HostPath: "/data",
-				},
-				Images:  &pdaiv1alpha1.RoleImages{Scheduler: "s", Prefill: "p", Decode: "d"},
-				Prefill: pdaiv1alpha1.RoleSpec{Replicas: 1, Resources: pdaiv1alpha1.ResourceSpec{GPU: "1"}},
-				Decode:  pdaiv1alpha1.RoleSpec{Replicas: 1, Resources: pdaiv1alpha1.ResourceSpec{GPU: "1"}},
-			}
-			obj.Spec = *oldObj.Spec.DeepCopy()
-			obj.Spec.Prefill.Replicas = 3 // only replicas changed
+		It("TestValidateUpdate_ReplicasAllowed: should allow updating replicas", func() {
+			oldObj = makeValidPDIS()
+			obj = makeValidPDIS()
+			obj.Spec.Prefill.Replicas = 3
 
 			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
 			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("TestValidateUpdate_ImmutableEngine: should reject engine field change", func() {
+			oldObj = makeValidPDIS()
+			obj = makeValidPDIS()
+			obj.Spec.Engine = "vllm"
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(strings.ToLower(err.Error())).To(ContainSubstring("immutable"))
+		})
+
+		It("TestValidateUpdate_ImmutableEngineProfileRef: should reject engineProfileRef change", func() {
+			oldObj = makeValidPDIS()
+			oldObj.Spec.EngineProfileRef = "profile-a"
+			obj = makeValidPDIS()
+			obj.Spec.EngineProfileRef = "profile-b"
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(strings.ToLower(err.Error())).To(ContainSubstring("immutable"))
 		})
 	})
 })

@@ -28,24 +28,6 @@ const (
 	EngineTypeSGLang EngineType = "sglang"
 )
 
-// StorageType defines how the model is stored and mounted.
-type StorageType string
-
-const (
-	StorageTypeHostPath StorageType = "hostPath"
-	StorageTypePVC      StorageType = "pvc"
-)
-
-// KVBackend defines the KV cache transfer backend.
-// +kubebuilder:validation:Enum=mooncake;nixl;nccl
-type KVBackend string
-
-const (
-	KVBackendMooncake KVBackend = "mooncake"
-	KVBackendNixl     KVBackend = "nixl"
-	KVBackendNccl     KVBackend = "nccl"
-)
-
 // Phase represents the lifecycle phase of a PDInferenceService.
 // +kubebuilder:validation:Enum=Pending;Initializing;Running;Failed;Terminating
 type Phase string
@@ -58,78 +40,154 @@ const (
 	PhaseTerminating  Phase = "Terminating"
 )
 
-// RouterStrategy defines the routing strategy for the scheduler.
-type RouterStrategy string
+// ─── Volume types ─────────────────────────────────────────────────────────────
 
-const (
-	RouterStrategyCacheAware   RouterStrategy = "cache-aware"
-	RouterStrategyRandom       RouterStrategy = "random"
-	RouterStrategyRoundRobin   RouterStrategy = "round-robin"
-	RouterStrategyPowerOfTwo   RouterStrategy = "power-of-two"
-)
-
-// ModelStorageSpec describes how the model is stored and where to mount it.
-type ModelStorageSpec struct {
-	// Type is the storage type: hostPath or pvc.
-	Type StorageType `json:"type"`
-	// HostPath is the node-local path to the model directory (used when type=hostPath).
-	HostPath string `json:"hostPath,omitempty"`
-	// PVCName is the PVC name (used when type=pvc).
-	PVCName string `json:"pvcName,omitempty"`
-	// MountPath is where the model directory is mounted inside the container.
-	// Defaults to /models.
-	MountPath string `json:"mountPath,omitempty"`
+// HostPathVolume defines a hostPath volume source.
+type HostPathVolume struct {
+	// Path is the node-local directory path.
+	Path string `json:"path"`
+	// Type is the hostPath type (e.g. "Directory", "File"). Optional.
+	Type string `json:"type,omitempty"`
 }
 
-// RoleImages defines the container images for each role.
-type RoleImages struct {
-	Scheduler string `json:"scheduler"`
-	Prefill   string `json:"prefill"`
-	Decode    string `json:"decode"`
+// EmptyDirVolume defines an emptyDir volume source.
+type EmptyDirVolume struct {
+	// Medium is the storage medium (e.g. "Memory"). Empty string means default (disk).
+	Medium string `json:"medium,omitempty"`
+	// SizeLimit is the maximum size of the volume (e.g. "20Gi"). Optional.
+	SizeLimit string `json:"sizeLimit,omitempty"`
 }
 
-// ResourceSpec defines compute resources for a role.
-type ResourceSpec struct {
-	// GPU is the number of GPU cards (e.g. "1", "4").
-	GPU string `json:"gpu"`
-	// GPUType optionally constrains the GPU model (e.g. "A30", "H100").
-	GPUType string `json:"gpuType,omitempty"`
+// PVCVolume defines a PersistentVolumeClaim volume source.
+type PVCVolume struct {
+	// ClaimName is the name of the PersistentVolumeClaim.
+	ClaimName string `json:"claimName"`
 }
 
-// RoleSpec describes a prefill or decode role.
-type RoleSpec struct {
+// VolumeSpec defines a volume that can be shared across roles.
+// Exactly one of hostPath, emptyDir, or pvc must be set.
+type VolumeSpec struct {
+	// Name is the volume name referenced by volumeMounts.
+	Name string `json:"name"`
+	// HostPath mounts a host directory.
+	HostPath *HostPathVolume `json:"hostPath,omitempty"`
+	// EmptyDir creates an ephemeral directory (optionally in-memory).
+	EmptyDir *EmptyDirVolume `json:"emptyDir,omitempty"`
+	// PVC mounts a PersistentVolumeClaim.
+	PVC *PVCVolume `json:"pvc,omitempty"`
+}
+
+// VolumeMountSpec references a named volume from spec.volumes and specifies where to mount it.
+type VolumeMountSpec struct {
+	// Name must match a volume defined in spec.volumes.
+	Name string `json:"name"`
+	// MountPath is the path inside the container where the volume is mounted.
+	MountPath string `json:"mountPath"`
+	// ReadOnly mounts the volume as read-only. Defaults to false.
+	ReadOnly bool `json:"readOnly,omitempty"`
+}
+
+// ─── Resource types ───────────────────────────────────────────────────────────
+
+// RoleResources defines CPU and memory requests and limits for a role.
+// Keys follow Kubernetes resource conventions (e.g. "cpu", "memory").
+type RoleResources struct {
+	// Requests is the minimum resources required.
+	Requests map[string]string `json:"requests,omitempty"`
+	// Limits is the maximum resources allowed.
+	Limits map[string]string `json:"limits,omitempty"`
+}
+
+// ─── Health check types ───────────────────────────────────────────────────────
+
+// ProbeSpec defines an HTTP GET health check probe.
+type ProbeSpec struct {
+	// HTTPPath is the HTTP endpoint to probe. Defaults to "/health".
+	HTTPPath string `json:"httpPath,omitempty"`
+	// Port is the port to probe. Defaults to 8000.
+	Port int32 `json:"port,omitempty"`
+	// InitialDelaySeconds is the number of seconds after the container starts before probing begins.
+	InitialDelaySeconds int32 `json:"initialDelaySeconds,omitempty"`
+	// PeriodSeconds is how often (in seconds) to perform the probe.
+	PeriodSeconds int32 `json:"periodSeconds,omitempty"`
+	// TimeoutSeconds is the number of seconds after which the probe times out.
+	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
+	// FailureThreshold is the minimum consecutive failures for the probe to be considered failed.
+	FailureThreshold int32 `json:"failureThreshold,omitempty"`
+}
+
+// ─── Role spec types ──────────────────────────────────────────────────────────
+
+// RouterRoleSpec defines the complete configuration for the router role.
+type RouterRoleSpec struct {
+	// Image is the container image for the router.
+	// Required when engineProfileRef is not set.
+	Image string `json:"image,omitempty"`
+
+	// Replicas is the number of router instances. Defaults to 1.
+	// +kubebuilder:validation:Minimum=1
+	Replicas int32 `json:"replicas,omitempty"`
+
+	// Resources defines CPU and memory requests and limits for the router container.
+	Resources *RoleResources `json:"resources,omitempty"`
+
+	// VolumeMounts lists volume mounts referencing volumes defined in spec.volumes.
+	VolumeMounts []VolumeMountSpec `json:"volumeMounts,omitempty"`
+
+	// Args are the complete startup arguments passed to the router container.
+	// Required (either here or via engineProfileRef).
+	Args []string `json:"args,omitempty"`
+
+	// ReadinessProbe configures the readiness health check for the router.
+	ReadinessProbe *ProbeSpec `json:"readinessProbe,omitempty"`
+
+	// LivenessProbe configures the liveness health check for the router.
+	LivenessProbe *ProbeSpec `json:"livenessProbe,omitempty"`
+}
+
+// InferenceRoleSpec defines the complete configuration for a prefill or decode role.
+type InferenceRoleSpec struct {
+	// Image is the container image for this role.
+	// Required when engineProfileRef is not set.
+	Image string `json:"image,omitempty"`
+
+	// Replicas is the number of instances for this role.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=100
-	Replicas  int32        `json:"replicas"`
-	Resources ResourceSpec `json:"resources"`
+	Replicas int32 `json:"replicas"`
+
+	// GPU is the number of GPU devices to allocate per pod (e.g. "2").
+	GPU string `json:"gpu,omitempty"`
+
+	// GPUType constrains scheduling to nodes with the matching "accelerator" label
+	// (e.g. "a30", "h100").
+	GPUType string `json:"gpuType,omitempty"`
+
+	// Resources defines CPU and memory requests and limits.
+	// GPU resources are specified via the GPU field.
+	Resources *RoleResources `json:"resources,omitempty"`
+
+	// VolumeMounts lists volume mounts referencing volumes defined in spec.volumes.
+	VolumeMounts []VolumeMountSpec `json:"volumeMounts,omitempty"`
+
+	// Args are the complete startup arguments passed to the inference container.
+	// pd-manager does not auto-inject engine args; all args must be specified here
+	// or supplied by the referenced engineProfileRef.
+	// The environment variable $(POD_IP) is available for use in args.
+	Args []string `json:"args,omitempty"`
+
+	// ReadinessProbe configures the readiness health check.
+	ReadinessProbe *ProbeSpec `json:"readinessProbe,omitempty"`
+
+	// LivenessProbe configures the liveness health check.
+	LivenessProbe *ProbeSpec `json:"livenessProbe,omitempty"`
+
+	// EngineRuntimes injects sidecar containers into this role's pods via RBG engineRuntimes.
+	// Used for platform integrations such as Patio worker registration.
+	EngineRuntimes []EngineRuntime `json:"engineRuntimes,omitempty"`
 }
 
-// RouterSpec configures the sgl-router scheduler.
-type RouterSpec struct {
-	// Strategy is the routing strategy.
-	Strategy RouterStrategy `json:"strategy,omitempty"`
-}
-
-// KVTransfer configures the KV cache transfer between prefill and decode.
-type KVTransfer struct {
-	// Backend is the KV transfer backend.
-	// +kubebuilder:validation:Enum=mooncake;nixl;nccl
-	Backend KVBackend `json:"backend"`
-}
-
-// RoleExtraArgs holds per-role extra arguments to pass to the inference engine.
-type RoleExtraArgs struct {
-	Prefill   []string `json:"prefill,omitempty"`
-	Decode    []string `json:"decode,omitempty"`
-	Scheduler []string `json:"scheduler,omitempty"`
-}
-
-// EngineConfig holds structured and unstructured engine configuration.
-type EngineConfig struct {
-	TensorParallelSize *int32         `json:"tensorParallelSize,omitempty"`
-	KVTransfer         *KVTransfer    `json:"kvTransfer,omitempty"`
-	ExtraArgs          *RoleExtraArgs `json:"extraArgs,omitempty"`
-}
+// ─── HPA types ────────────────────────────────────────────────────────────────
 
 // HPASpec defines Horizontal Pod Autoscaler configuration for a role.
 type HPASpec struct {
@@ -142,6 +200,8 @@ type ScalingSpec struct {
 	Decode  *HPASpec `json:"decode,omitempty"`
 	Prefill *HPASpec `json:"prefill,omitempty"`
 }
+
+// ─── Status types ─────────────────────────────────────────────────────────────
 
 // RoleStatus reports the observed state of a single role.
 type RoleStatus struct {
@@ -156,9 +216,12 @@ type EventRecord struct {
 	Message string `json:"message,omitempty"`
 }
 
+// ─── Main spec / status ───────────────────────────────────────────────────────
+
 // PDInferenceServiceSpec defines the desired state of PDInferenceService.
 type PDInferenceServiceSpec struct {
-	// Model is the logical model name (e.g. "qwen3-14b").
+	// Model is the model identifier (e.g. "Qwen/Qwen3-14B").
+	// Used for labeling and as the served-model-name in inference APIs.
 	Model string `json:"model"`
 
 	// Engine selects the inference engine. Defaults to sglang.
@@ -166,32 +229,25 @@ type PDInferenceServiceSpec struct {
 	// +kubebuilder:default=sglang
 	Engine EngineType `json:"engine,omitempty"`
 
-	// ModelStorage describes where the model files are located.
-	ModelStorage ModelStorageSpec `json:"modelStorage"`
+	// Volumes defines shared volumes available to all roles via volumeMounts.
+	Volumes []VolumeSpec `json:"volumes,omitempty"`
 
-	// Images specifies the container images for each role.
-	// Required when engineProfileRef is not set.
-	Images *RoleImages `json:"images,omitempty"`
+	// Router configures the router role (sgl-router / sgl-model-gateway).
+	Router RouterRoleSpec `json:"router"`
 
 	// Prefill configures the prefill role.
-	Prefill RoleSpec `json:"prefill"`
+	Prefill InferenceRoleSpec `json:"prefill"`
 
 	// Decode configures the decode role.
-	Decode RoleSpec `json:"decode"`
+	Decode InferenceRoleSpec `json:"decode"`
 
-	// Router configures the sgl-router scheduler.
-	Router *RouterSpec `json:"router,omitempty"`
-
-	// PDRatio is the desired prefill:decode ratio (e.g. "1:2").
+	// PDRatio is the desired prefill:decode replica ratio (e.g. "1:2").
 	// Mutually exclusive with scaling.prefill.
 	PDRatio string `json:"pdRatio,omitempty"`
 
-	// EngineProfileRef names a PDEngineProfile in the pd-system namespace
-	// to use as the base engine configuration template.
+	// EngineProfileRef names a PDEngineProfile in the same namespace
+	// to use as the base configuration template (images and per-role args).
 	EngineProfileRef string `json:"engineProfileRef,omitempty"`
-
-	// EngineConfig provides inline engine configuration that overrides the profile.
-	EngineConfig *EngineConfig `json:"engineConfig,omitempty"`
 
 	// Scaling configures HPA-based autoscaling.
 	Scaling *ScalingSpec `json:"scaling,omitempty"`

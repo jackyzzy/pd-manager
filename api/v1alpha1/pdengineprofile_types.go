@@ -61,11 +61,30 @@ type EngineRuntime struct {
 	Containers  []RuntimeContainer `json:"containers,omitempty"`
 }
 
+// RoleImages defines the container images for each role.
+type RoleImages struct {
+	Router  string `json:"router"`
+	Prefill string `json:"prefill"`
+	Decode  string `json:"decode"`
+}
+
 // RoleEngineRuntimes holds per-role lists of engine runtimes to be forwarded to RBG.
 type RoleEngineRuntimes struct {
-	Prefill   []EngineRuntime `json:"prefill,omitempty"`
-	Decode    []EngineRuntime `json:"decode,omitempty"`
-	Scheduler []EngineRuntime `json:"scheduler,omitempty"`
+	Router  []EngineRuntime `json:"router,omitempty"`
+	Prefill []EngineRuntime `json:"prefill,omitempty"`
+	Decode  []EngineRuntime `json:"decode,omitempty"`
+}
+
+// RoleArgs defines per-role startup argument templates in a PDEngineProfile.
+// When a PDInferenceService references a profile via engineProfileRef and a role's
+// args field is empty, the profile's args are used as the default.
+type RoleArgs struct {
+	// Router holds default startup args for the router role.
+	Router []string `json:"router,omitempty"`
+	// Prefill holds default startup args for the prefill role.
+	Prefill []string `json:"prefill,omitempty"`
+	// Decode holds default startup args for the decode role.
+	Decode []string `json:"decode,omitempty"`
 }
 
 // PDEngineProfileSpec defines the desired state of PDEngineProfile.
@@ -77,13 +96,15 @@ type PDEngineProfileSpec struct {
 	Applicability *ApplicabilitySpec `json:"applicability,omitempty"`
 
 	// Images specifies the container images for each role.
-	Images RoleImages `json:"images"`
+	// Used as defaults when a PDInferenceService role's image field is empty.
+	Images RoleImages `json:"images,omitempty"`
+
+	// RoleArgs provides default startup args for each role.
+	// Used when a PDInferenceService role's args field is empty.
+	RoleArgs *RoleArgs `json:"roleArgs,omitempty"`
 
 	// EngineRuntimes are forwarded verbatim to the RBG roleSpec.engineRuntimes field.
 	EngineRuntimes *RoleEngineRuntimes `json:"engineRuntimes,omitempty"`
-
-	// EngineConfig provides the base engine configuration for this profile.
-	EngineConfig EngineConfig `json:"engineConfig"`
 }
 
 // PDEngineProfileStatus defines the observed state of PDEngineProfile.

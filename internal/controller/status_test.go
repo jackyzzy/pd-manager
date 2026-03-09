@@ -57,7 +57,7 @@ func TestComputePhase_PodsNotReady(t *testing.T) {
 	rbg := makeRBG([]rbgv1alpha1.RoleStatus{
 		{Name: "prefill", Replicas: 2, ReadyReplicas: 1},
 		{Name: "decode", Replicas: 1, ReadyReplicas: 1},
-		{Name: "scheduler", Replicas: 1, ReadyReplicas: 1},
+		{Name: "router", Replicas: 1, ReadyReplicas: 1},
 	}, nil)
 	pdis := makePDIS("test", 60) // 60 seconds ago, well within 30 min
 	phase := computePhase(rbg, pdis)
@@ -68,7 +68,7 @@ func TestComputePhase_PodsNotReady(t *testing.T) {
 
 func TestComputePhase_AllReady(t *testing.T) {
 	rbg := makeRBG([]rbgv1alpha1.RoleStatus{
-		{Name: "scheduler", Replicas: 1, ReadyReplicas: 1},
+		{Name: "router", Replicas: 1, ReadyReplicas: 1},
 		{Name: "prefill", Replicas: 2, ReadyReplicas: 2},
 		{Name: "decode", Replicas: 2, ReadyReplicas: 2},
 	}, nil)
@@ -115,7 +115,7 @@ func TestComputePhase_DeletionTimestamp(t *testing.T) {
 
 func TestBuildRoleStatuses(t *testing.T) {
 	rbg := makeRBG([]rbgv1alpha1.RoleStatus{
-		{Name: "scheduler", Replicas: 1, ReadyReplicas: 1},
+		{Name: "router", Replicas: 1, ReadyReplicas: 1},
 		{Name: "prefill", Replicas: 3, ReadyReplicas: 2},
 		{Name: "decode", Replicas: 2, ReadyReplicas: 2},
 	}, nil)
@@ -125,9 +125,9 @@ func TestBuildRoleStatuses(t *testing.T) {
 	}
 	for _, s := range statuses {
 		switch s.Name {
-		case "scheduler":
+		case "router":
 			if s.Ready != 1 || s.Total != 1 {
-				t.Errorf("scheduler: got ready=%d total=%d", s.Ready, s.Total)
+				t.Errorf("router: got ready=%d total=%d", s.Ready, s.Total)
 			}
 		case "prefill":
 			if s.Ready != 2 || s.Total != 3 {

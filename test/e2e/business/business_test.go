@@ -47,18 +47,18 @@ const (
 	// servedModelName is the model name reported by the API.
 	servedModelName = "Qwen/Qwen3-14B"
 
-	// schedulerImage / prefillImage / decodeImage are the container images.
-	schedulerImage = "lmsysorg/sgl-model-gateway:v0.3.1"
-	prefillImage   = "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime"
-	decodeImage    = "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime"
+	// routerImage / prefillImage / decodeImage are the container images.
+	routerImage  = "lmsysorg/sgl-model-gateway:v0.3.1"
+	prefillImage = "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime"
+	decodeImage  = "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime"
 
-	// routerLocalPort is the local port used for kubectl port-forward to the scheduler.
+	// routerLocalPort is the local port used for kubectl port-forward to the router.
 	routerLocalPort = "18080"
 
 	// Timeouts
-	shortTimeout  = 2 * time.Minute
-	podTimeout    = 30 * time.Minute // GPU pods take ~15-20 min to load the model
-	inferTimeout  = 5 * time.Minute
+	shortTimeout = 2 * time.Minute
+	podTimeout   = 30 * time.Minute // GPU pods take ~15-20 min to load the model
+	inferTimeout = 5 * time.Minute
 )
 
 // ── PDInferenceService fixture ────────────────────────────────────────────────
@@ -73,71 +73,154 @@ metadata:
   namespace: %s
 spec:
   model: %s
-  modelStorage:
-    type: hostPath
-    hostPath: %s
-    mountPath: /models
-  images:
-    scheduler: %s
-    prefill:   %s
-    decode:    %s
-  prefill:
-    replicas: 1
-    resources:
-      gpu: "2"
-  decode:
-    replicas: 1
-    resources:
-      gpu: "2"
+
+  volumes:
+  - name: model-storage
+    hostPath:
+      path: %s
+      type: Directory
+  - name: dshm
+    emptyDir:
+      medium: Memory
+      sizeLimit: 20Gi
+
   router:
-    strategy: round-robin
-  engineConfig:
-    tensorParallelSize: 2
-    kvTransfer:
-      backend: nixl
-    extraArgs:
-      prefill:
-        - --trust-remote-code
-        - --disable-radix-cache
-        - --mem-fraction-static
-        - "0.88"
-        - --chunked-prefill-size
-        - "8192"
-        - --page-size
-        - "128"
-        - --cuda-graph-max-bs
-        - "256"
-      decode:
-        - --trust-remote-code
-        - --disable-radix-cache
-        - --mem-fraction-static
-        - "0.88"
-        - --chunked-prefill-size
-        - "8192"
-        - --page-size
-        - "128"
-        - --cuda-graph-max-bs
-        - "256"
-      scheduler:
-        - --health-check-timeout-secs
-        - "6000000"
-        - --health-check-interval-secs
-        - "6000"
-        - --worker-startup-timeout-secs
-        - "3600"
-        - --worker-startup-check-interval
-        - "30"
-        - --retry-max-retries
-        - "30"
-        - --retry-initial-backoff-ms
-        - "30000"
-        - --retry-max-backoff-ms
-        - "60000"
+    image: %s
+    replicas: 1
+    resources:
+      requests: {memory: 4Gi, cpu: "4"}
+      limits:   {memory: 4Gi, cpu: "4"}
+    volumeMounts:
+    - name: model-storage
+      mountPath: /models
+    args:
+    - --pd-disaggregation
+    - --host
+    - 0.0.0.0
+    - --port
+    - "8000"
+    - --model-path
+    - /models
+    - --policy
+    - round-robin
+    - --health-check-timeout-secs
+    - "6000000"
+    - --health-check-interval-secs
+    - "6000"
+    - --worker-startup-timeout-secs
+    - "3600"
+    - --worker-startup-check-interval
+    - "30"
+    - --retry-max-retries
+    - "30"
+    - --retry-initial-backoff-ms
+    - "30000"
+    - --retry-max-backoff-ms
+    - "60000"
+    readinessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 30
+      periodSeconds: 10
+
+  prefill:
+    image: %s
+    replicas: 1
+    gpu: "2"
+    gpuType: a30
+    resources:
+      requests: {memory: 96Gi, cpu: "16"}
+      limits:   {memory: 128Gi, cpu: "32"}
+    volumeMounts:
+    - name: model-storage
+      mountPath: /models
+    - name: dshm
+      mountPath: /dev/shm
+    args:
+    - --model-path
+    - /models
+    - --served-model-name
+    - %s
+    - --trust-remote-code
+    - --tp-size
+    - "2"
+    - --host
+    - $(POD_IP)
+    - --port
+    - "8000"
+    - --disaggregation-mode
+    - prefill
+    - --disaggregation-transfer-backend
+    - nixl
+    - --mem-fraction-static
+    - "0.88"
+    - --disable-radix-cache
+    - --chunked-prefill-size
+    - "8192"
+    - --page-size
+    - "128"
+    - --cuda-graph-max-bs
+    - "256"
+    readinessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      failureThreshold: 10
+
+  decode:
+    image: %s
+    replicas: 1
+    gpu: "2"
+    gpuType: a30
+    resources:
+      requests: {memory: 96Gi, cpu: "16"}
+      limits:   {memory: 128Gi, cpu: "32"}
+    volumeMounts:
+    - name: model-storage
+      mountPath: /models
+    - name: dshm
+      mountPath: /dev/shm
+    args:
+    - --model-path
+    - /models
+    - --served-model-name
+    - %s
+    - --trust-remote-code
+    - --tp-size
+    - "2"
+    - --host
+    - $(POD_IP)
+    - --port
+    - "8000"
+    - --disaggregation-mode
+    - decode
+    - --disaggregation-transfer-backend
+    - nixl
+    - --mem-fraction-static
+    - "0.88"
+    - --disable-radix-cache
+    - --chunked-prefill-size
+    - "8192"
+    - --page-size
+    - "128"
+    - --cuda-graph-max-bs
+    - "256"
+    readinessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      failureThreshold: 10
 `,
 	testServiceName, testNamespace,
 	servedModelName,
 	modelPath,
-	schedulerImage, prefillImage, decodeImage,
+	routerImage,
+	prefillImage,
+	servedModelName,
+	decodeImage,
+	servedModelName,
 )
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -224,7 +307,7 @@ func podContainerState(podName, namespace string) string {
 	}
 	// Parse the JSON state object
 	var state struct {
-		Running    *struct{}           `json:"running"`
+		Running    *struct{}                               `json:"running"`
 		Waiting    *struct{ Reason string `json:"reason"` } `json:"waiting"`
 		Terminated *struct{ Reason string `json:"reason"` } `json:"terminated"`
 	}
@@ -252,18 +335,18 @@ func getPodsForRole(role, namespace string) []string {
 	return strings.Fields(out)
 }
 
-// schedulerServiceName returns the Service name for the scheduler role.
+// routerServiceName returns the Service name for the router role.
 // RBG creates a headless service per StatefulSet role with prefix "s-".
-func schedulerServiceName() string {
-	return fmt.Sprintf("s-%s-scheduler", testServiceName)
+func routerServiceName() string {
+	return fmt.Sprintf("s-%s-router", testServiceName)
 }
 
-// portForwardRouter starts kubectl port-forward for the scheduler service
+// portForwardRouter starts kubectl port-forward for the router service
 // and returns a cancel func.  Callers must invoke cancel() when done.
 func portForwardRouter() (localAddr string, cancel context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, "kubectl", "port-forward",
-		"svc/"+schedulerServiceName(),
+		"svc/"+routerServiceName(),
 		routerLocalPort+":8000",
 		"-n", testNamespace,
 	)
@@ -331,7 +414,7 @@ var _ = Describe("PDInferenceService Business E2E", Ordered, func() {
 	AfterEach(func() {
 		if CurrentSpecReport().Failed() {
 			By("collecting diagnostic info on failure")
-			for _, role := range []string{"scheduler", "prefill", "decode"} {
+			for _, role := range []string{"router", "prefill", "decode"} {
 				pods := getPodsForRole(role, testNamespace)
 				for _, pod := range pods {
 					logs, _ := kubectl("logs", pod, "-n", testNamespace, "--tail=50")
@@ -360,11 +443,11 @@ var _ = Describe("PDInferenceService Business E2E", Ordered, func() {
 				return err
 			}).Should(Succeed())
 
-			By("verifying RBG has scheduler, prefill, decode roles")
+			By("verifying RBG has router, prefill, decode roles")
 			out, err := kubectl("get", "rolebasedgroup", testServiceName, "-n", testNamespace,
 				"-o", "jsonpath={.spec.roles[*].name}")
 			Expect(err).NotTo(HaveOccurred())
-			for _, role := range []string{"scheduler", "prefill", "decode"} {
+			for _, role := range []string{"router", "prefill", "decode"} {
 				Expect(out).To(ContainSubstring(role), "RBG should have role %q", role)
 			}
 		})
@@ -377,23 +460,13 @@ var _ = Describe("PDInferenceService Business E2E", Ordered, func() {
 			}).Should(ContainSubstring("finalizer"), "PDInferenceService should have a finalizer")
 		})
 
-		It("should set correct prefill/decode worker URLs in scheduler args", func() {
-			By("checking scheduler role args in RBG spec")
+		It("should have --pd-disaggregation flag in router args", func() {
+			By("checking router role args in RBG spec")
 			out, err := kubectl("get", "rolebasedgroup", testServiceName, "-n", testNamespace,
-				"-o", "jsonpath={.spec.roles[?(@.name=='scheduler')].template.spec.containers[0].args}")
+				"-o", "jsonpath={.spec.roles[?(@.name=='router')].template.spec.containers[0].args}")
 			Expect(err).NotTo(HaveOccurred())
-
-			expectedPrefill := fmt.Sprintf("%s-prefill-0.s-%s-prefill.%s.svc.cluster.local:8000",
-				testServiceName, testServiceName, testNamespace)
-			expectedDecode := fmt.Sprintf("%s-decode-0.s-%s-decode.%s.svc.cluster.local:8000",
-				testServiceName, testServiceName, testNamespace)
-
 			Expect(out).To(ContainSubstring("--pd-disaggregation"),
-				"scheduler should have --pd-disaggregation flag")
-			Expect(out).To(ContainSubstring(expectedPrefill),
-				"scheduler should have --prefill URL for prefill-0")
-			Expect(out).To(ContainSubstring(expectedDecode),
-				"scheduler should have --decode URL for decode-0")
+				"router should have --pd-disaggregation flag")
 		})
 	})
 
@@ -402,7 +475,7 @@ var _ = Describe("PDInferenceService Business E2E", Ordered, func() {
 	Context("Tier 2: Pod health checks", func() {
 
 		It("should schedule pods for all three roles within 5 minutes", func() {
-			for _, role := range []string{"scheduler", "prefill", "decode"} {
+			for _, role := range []string{"router", "prefill", "decode"} {
 				role := role
 				Eventually(func() int {
 					return len(getPodsForRole(role, testNamespace))
@@ -416,7 +489,7 @@ var _ = Describe("PDInferenceService Business E2E", Ordered, func() {
 			// but short enough to catch early crashes before model loading starts.
 			time.Sleep(3 * time.Minute)
 
-			for _, role := range []string{"scheduler", "prefill", "decode"} {
+			for _, role := range []string{"router", "prefill", "decode"} {
 				pods := getPodsForRole(role, testNamespace)
 				for _, pod := range pods {
 					state := podContainerState(pod, testNamespace)
@@ -435,7 +508,7 @@ var _ = Describe("PDInferenceService Business E2E", Ordered, func() {
 
 		It("should have all pods Running within the GPU startup timeout", func() {
 			// GPU model loading takes ~15-20 min for Qwen3-14B with tp=2.
-			for _, role := range []string{"scheduler", "prefill", "decode"} {
+			for _, role := range []string{"router", "prefill", "decode"} {
 				role := role
 				Eventually(func(g Gomega) {
 					pods := getPodsForRole(role, testNamespace)
@@ -480,7 +553,7 @@ var _ = Describe("PDInferenceService Business E2E", Ordered, func() {
 		var cancelPF context.CancelFunc
 
 		BeforeAll(func() {
-			By("port-forwarding to scheduler service")
+			By("port-forwarding to router service")
 			routerBase, cancelPF = portForwardRouter()
 		})
 		AfterAll(func() {
@@ -524,7 +597,7 @@ var _ = Describe("PDInferenceService Business E2E", Ordered, func() {
 		var cancelPF context.CancelFunc
 
 		BeforeAll(func() {
-			By("port-forwarding to scheduler service for inference")
+			By("port-forwarding to router service for inference")
 			routerBase, cancelPF = portForwardRouter()
 		})
 		AfterAll(func() {
@@ -586,7 +659,7 @@ var _ = Describe("PDInferenceService Business E2E", Ordered, func() {
 			}, shortTimeout, 5*time.Second).Should(BeEmpty(), "RBG should be cascade-deleted")
 
 			By("verifying all role pods are gone")
-			for _, role := range []string{"scheduler", "prefill", "decode"} {
+			for _, role := range []string{"router", "prefill", "decode"} {
 				Eventually(func() int {
 					return len(getPodsForRole(role, testNamespace))
 				}, shortTimeout, 10*time.Second).Should(Equal(0),

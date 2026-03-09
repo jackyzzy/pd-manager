@@ -24,32 +24,26 @@ import (
 // TestPDInferenceServiceSpec_RequiredFields verifies that the minimum required fields
 // can be set, serialized and deserialized without data loss.
 func TestPDInferenceServiceSpec_RequiredFields(t *testing.T) {
-	tp := int32(2)
 	spec := PDInferenceServiceSpec{
 		Model: "qwen3-14b",
-		ModelStorage: ModelStorageSpec{
-			Type:     StorageTypeHostPath,
-			HostPath: "/data/models",
-		},
-		Images: &RoleImages{
-			Scheduler: "sgl-router:latest",
-			Prefill:   "sglang:latest",
-			Decode:    "sglang:latest",
-		},
-		Prefill: RoleSpec{
+		Router: RouterRoleSpec{
+			Image:    "sgl-router:latest",
 			Replicas: 1,
-			Resources: ResourceSpec{
-				GPU: "1",
-			},
+			Args:     []string{"--host", "0.0.0.0", "--port", "8000"},
 		},
-		Decode: RoleSpec{
+		Prefill: InferenceRoleSpec{
+			Image:    "sglang:latest",
 			Replicas: 1,
-			Resources: ResourceSpec{
-				GPU: "1",
-			},
+			GPU:      "2",
+			GPUType:  "a30",
+			Args:     []string{"--disaggregation-mode", "prefill"},
 		},
-		EngineConfig: &EngineConfig{
-			TensorParallelSize: &tp,
+		Decode: InferenceRoleSpec{
+			Image:    "sglang:latest",
+			Replicas: 1,
+			GPU:      "2",
+			GPUType:  "a30",
+			Args:     []string{"--disaggregation-mode", "decode"},
 		},
 	}
 
@@ -66,8 +60,8 @@ func TestPDInferenceServiceSpec_RequiredFields(t *testing.T) {
 	if decoded.Model != spec.Model {
 		t.Errorf("Model mismatch: got %q, want %q", decoded.Model, spec.Model)
 	}
-	if decoded.ModelStorage.HostPath != spec.ModelStorage.HostPath {
-		t.Errorf("ModelStorage.HostPath mismatch")
+	if decoded.Router.Image != "sgl-router:latest" {
+		t.Errorf("Router.Image mismatch: got %q", decoded.Router.Image)
 	}
 	if decoded.Prefill.Replicas != 1 {
 		t.Errorf("Prefill.Replicas mismatch: got %d", decoded.Prefill.Replicas)
@@ -75,11 +69,11 @@ func TestPDInferenceServiceSpec_RequiredFields(t *testing.T) {
 	if decoded.Decode.Replicas != 1 {
 		t.Errorf("Decode.Replicas mismatch: got %d", decoded.Decode.Replicas)
 	}
-	if decoded.EngineConfig == nil || decoded.EngineConfig.TensorParallelSize == nil {
-		t.Fatal("EngineConfig.TensorParallelSize should not be nil")
+	if decoded.Prefill.GPU != "2" {
+		t.Errorf("Prefill.GPU mismatch: got %q", decoded.Prefill.GPU)
 	}
-	if *decoded.EngineConfig.TensorParallelSize != 2 {
-		t.Errorf("TensorParallelSize mismatch: got %d", *decoded.EngineConfig.TensorParallelSize)
+	if decoded.Prefill.GPUType != "a30" {
+		t.Errorf("Prefill.GPUType mismatch: got %q", decoded.Prefill.GPUType)
 	}
 }
 
@@ -102,30 +96,26 @@ func TestPhase_Constants(t *testing.T) {
 	}
 }
 
-// TestKVBackend_Constants verifies the KVBackend enum constants.
-func TestKVBackend_Constants(t *testing.T) {
-	tests := []struct {
-		backend KVBackend
-		want    string
-	}{
-		{KVBackendMooncake, "mooncake"},
-		{KVBackendNixl, "nixl"},
-		{KVBackendNccl, "nccl"},
-	}
-	for _, tt := range tests {
-		if string(tt.backend) != tt.want {
-			t.Errorf("KVBackend constant wrong: got %q, want %q", tt.backend, tt.want)
-		}
-	}
-}
-
-// TestModelStorageSpec_DefaultMountPath verifies that MountPath with omitempty
-// is omitted from JSON when empty, allowing external defaulting logic to fill it.
-func TestModelStorageSpec_DefaultMountPath(t *testing.T) {
-	spec := ModelStorageSpec{
-		Type:     StorageTypeHostPath,
-		HostPath: "/data/models",
-		// MountPath intentionally omitted
+// TestVolumeSpec_AllTypes verifies that all volume types can be serialized correctly.
+func TestVolumeSpec_AllTypes(t *testing.T) {
+	spec := PDInferenceServiceSpec{
+		Model: "qwen3-14b",
+		Volumes: []VolumeSpec{
+			{
+				Name:     "model-storage",
+				HostPath: &HostPathVolume{Path: "/data/models", Type: "Directory"},
+			},
+			{
+				Name:     "dshm",
+				EmptyDir: &EmptyDirVolume{Medium: "Memory", SizeLimit: "20Gi"},
+			},
+			{
+				Name: "shared-pvc",
+				PVC:  &PVCVolume{ClaimName: "my-pvc"},
+			},
+		},
+		Prefill: InferenceRoleSpec{Replicas: 1},
+		Decode:  InferenceRoleSpec{Replicas: 1},
 	}
 
 	data, err := json.Marshal(spec)
@@ -133,41 +123,52 @@ func TestModelStorageSpec_DefaultMountPath(t *testing.T) {
 		t.Fatalf("marshal failed: %v", err)
 	}
 
-	var m map[string]interface{}
-	if err := json.Unmarshal(data, &m); err != nil {
-		t.Fatalf("unmarshal to map failed: %v", err)
-	}
-
-	if _, ok := m["mountPath"]; ok {
-		t.Error("mountPath should be omitted from JSON when empty (omitempty)")
-	}
-}
-
-// TestEngineConfig_NilSafe verifies that a PDInferenceServiceSpec with nil EngineConfig
-// can be serialized without panics.
-func TestEngineConfig_NilSafe(t *testing.T) {
-	spec := PDInferenceServiceSpec{
-		Model: "qwen3-14b",
-		ModelStorage: ModelStorageSpec{
-			Type:     StorageTypeHostPath,
-			HostPath: "/data/models",
-		},
-		Prefill: RoleSpec{Replicas: 1, Resources: ResourceSpec{GPU: "1"}},
-		Decode:  RoleSpec{Replicas: 1, Resources: ResourceSpec{GPU: "1"}},
-		// EngineConfig is nil
-	}
-
-	data, err := json.Marshal(spec)
-	if err != nil {
-		t.Fatalf("marshal with nil EngineConfig failed: %v", err)
-	}
-
 	var decoded PDInferenceServiceSpec
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatalf("unmarshal failed: %v", err)
 	}
 
-	if decoded.EngineConfig != nil {
-		t.Error("EngineConfig should remain nil after round-trip")
+	if len(decoded.Volumes) != 3 {
+		t.Fatalf("expected 3 volumes, got %d", len(decoded.Volumes))
+	}
+	if decoded.Volumes[0].HostPath == nil || decoded.Volumes[0].HostPath.Path != "/data/models" {
+		t.Errorf("hostPath volume mismatch")
+	}
+	if decoded.Volumes[1].EmptyDir == nil || decoded.Volumes[1].EmptyDir.Medium != "Memory" {
+		t.Errorf("emptyDir volume mismatch")
+	}
+	if decoded.Volumes[2].PVC == nil || decoded.Volumes[2].PVC.ClaimName != "my-pvc" {
+		t.Errorf("pvc volume mismatch")
+	}
+}
+
+// TestProbeSpec_JSON verifies ProbeSpec serializes correctly.
+func TestProbeSpec_JSON(t *testing.T) {
+	probe := ProbeSpec{
+		HTTPPath:            "/health",
+		Port:                8000,
+		InitialDelaySeconds: 30,
+		PeriodSeconds:       10,
+		FailureThreshold:    5,
+	}
+
+	data, err := json.Marshal(probe)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+
+	var decoded ProbeSpec
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+
+	if decoded.HTTPPath != "/health" {
+		t.Errorf("HTTPPath mismatch: %v", decoded.HTTPPath)
+	}
+	if decoded.Port != 8000 {
+		t.Errorf("Port mismatch: %v", decoded.Port)
+	}
+	if decoded.InitialDelaySeconds != 30 {
+		t.Errorf("InitialDelaySeconds mismatch: %v", decoded.InitialDelaySeconds)
 	}
 }

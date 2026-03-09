@@ -52,8 +52,7 @@ var _ webhook.CustomDefaulter = &PDInferenceServiceCustomDefaulter{}
 
 // Default injects defaults:
 //   - engine = sglang
-//   - router.strategy = round-robin
-//   - modelStorage.mountPath = /models
+//   - router.replicas = 1 (if 0)
 func (d *PDInferenceServiceCustomDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	pdis, ok := obj.(*pdaiv1alpha1.PDInferenceService)
 	if !ok {
@@ -63,11 +62,8 @@ func (d *PDInferenceServiceCustomDefaulter) Default(ctx context.Context, obj run
 	if pdis.Spec.Engine == "" {
 		pdis.Spec.Engine = pdaiv1alpha1.EngineTypeSGLang
 	}
-	if pdis.Spec.Router == nil {
-		pdis.Spec.Router = &pdaiv1alpha1.RouterSpec{Strategy: pdaiv1alpha1.RouterStrategyRoundRobin}
-	}
-	if pdis.Spec.ModelStorage.MountPath == "" {
-		pdis.Spec.ModelStorage.MountPath = "/models"
+	if pdis.Spec.Router.Replicas < 1 {
+		pdis.Spec.Router.Replicas = 1
 	}
 
 	return nil
@@ -83,11 +79,11 @@ type PDInferenceServiceCustomValidator struct {
 var _ webhook.CustomValidator = &PDInferenceServiceCustomValidator{}
 
 // ValidateCreate enforces creation rules:
-//   - Required fields present (model, modelStorage)
-//   - images required when no engineProfileRef
-//   - Profile must exist when engineProfileRef is set
-//   - replicas >= 1
-//   - kvTransfer.backend must be a valid enum value
+//   - model is required
+//   - prefill.replicas >= 1, decode.replicas >= 1
+//   - each role must have an image (either inline or via engineProfileRef)
+//   - each role must have args (either inline or via engineProfileRef)
+//   - volumeMount names must reference a defined volume
 //   - pdRatio and scaling.prefill are mutually exclusive
 func (v *PDInferenceServiceCustomValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	pdis, ok := obj.(*pdaiv1alpha1.PDInferenceService)
@@ -100,11 +96,6 @@ func (v *PDInferenceServiceCustomValidator) ValidateCreate(ctx context.Context, 
 	// model is required
 	if pdis.Spec.Model == "" {
 		errs = append(errs, field.Required(field.NewPath("spec", "model"), "model name is required"))
-	}
-
-	// modelStorage.type is required
-	if pdis.Spec.ModelStorage.Type == "" {
-		errs = append(errs, field.Required(field.NewPath("spec", "modelStorage", "type"), "storage type is required"))
 	}
 
 	// replicas >= 1
@@ -123,20 +114,11 @@ func (v *PDInferenceServiceCustomValidator) ValidateCreate(ctx context.Context, 
 		))
 	}
 
-	// images required when no profile ref
-	if pdis.Spec.EngineProfileRef == "" {
-		if pdis.Spec.Images == nil ||
-			pdis.Spec.Images.Scheduler == "" ||
-			pdis.Spec.Images.Prefill == "" ||
-			pdis.Spec.Images.Decode == "" {
-			errs = append(errs, field.Required(
-				field.NewPath("spec", "images"),
-				"images (scheduler, prefill, decode) are required when engineProfileRef is not set",
-			))
-		}
-	} else {
-		// Profile must exist
-		if err := v.validateProfileExists(ctx, pdis.Spec.EngineProfileRef); err != nil {
+	hasProfile := pdis.Spec.EngineProfileRef != ""
+
+	// Validate profile exists when referenced
+	if hasProfile {
+		if err := v.validateProfileExists(ctx, pdis.Namespace, pdis.Spec.EngineProfileRef); err != nil {
 			errs = append(errs, field.Invalid(
 				field.NewPath("spec", "engineProfileRef"),
 				pdis.Spec.EngineProfileRef,
@@ -145,20 +127,50 @@ func (v *PDInferenceServiceCustomValidator) ValidateCreate(ctx context.Context, 
 		}
 	}
 
-	// kvTransfer.backend enum validation
-	if pdis.Spec.EngineConfig != nil && pdis.Spec.EngineConfig.KVTransfer != nil {
-		backend := pdis.Spec.EngineConfig.KVTransfer.Backend
-		switch backend {
-		case pdaiv1alpha1.KVBackendMooncake, pdaiv1alpha1.KVBackendNixl, pdaiv1alpha1.KVBackendNccl:
-			// valid
-		default:
-			errs = append(errs, field.Invalid(
-				field.NewPath("spec", "engineConfig", "kvTransfer", "backend"),
-				backend,
-				"invalid backend: must be one of mooncake, nixl, nccl",
+	// Each role must have an image (inline or from profile)
+	if !hasProfile {
+		if pdis.Spec.Router.Image == "" {
+			errs = append(errs, field.Required(
+				field.NewPath("spec", "router", "image"),
+				"router image is required when engineProfileRef is not set",
+			))
+		}
+		if pdis.Spec.Prefill.Image == "" {
+			errs = append(errs, field.Required(
+				field.NewPath("spec", "prefill", "image"),
+				"prefill image is required when engineProfileRef is not set",
+			))
+		}
+		if pdis.Spec.Decode.Image == "" {
+			errs = append(errs, field.Required(
+				field.NewPath("spec", "decode", "image"),
+				"decode image is required when engineProfileRef is not set",
+			))
+		}
+
+		// Each role must have args (inline or from profile)
+		if len(pdis.Spec.Router.Args) == 0 {
+			errs = append(errs, field.Required(
+				field.NewPath("spec", "router", "args"),
+				"router args are required when engineProfileRef is not set",
+			))
+		}
+		if len(pdis.Spec.Prefill.Args) == 0 {
+			errs = append(errs, field.Required(
+				field.NewPath("spec", "prefill", "args"),
+				"prefill args are required when engineProfileRef is not set",
+			))
+		}
+		if len(pdis.Spec.Decode.Args) == 0 {
+			errs = append(errs, field.Required(
+				field.NewPath("spec", "decode", "args"),
+				"decode args are required when engineProfileRef is not set",
 			))
 		}
 	}
+
+	// Validate volumeMount references
+	errs = append(errs, validateVolumeMounts(pdis)...)
 
 	// pdRatio and scaling.prefill are mutually exclusive
 	if pdis.Spec.PDRatio != "" && pdis.Spec.Scaling != nil && pdis.Spec.Scaling.Prefill != nil {
@@ -194,12 +206,6 @@ func (v *PDInferenceServiceCustomValidator) ValidateUpdate(ctx context.Context, 
 			"field is immutable after creation",
 		))
 	}
-	if oldPDIS.Spec.ModelStorage != newPDIS.Spec.ModelStorage {
-		errs = append(errs, field.Forbidden(
-			field.NewPath("spec", "modelStorage"),
-			"field is immutable after creation",
-		))
-	}
 	if oldPDIS.Spec.Engine != newPDIS.Spec.Engine {
 		errs = append(errs, field.Forbidden(
 			field.NewPath("spec", "engine"),
@@ -224,14 +230,43 @@ func (v *PDInferenceServiceCustomValidator) ValidateDelete(ctx context.Context, 
 	return nil, nil
 }
 
-// validateProfileExists checks that the named PDEngineProfile exists in pd-system namespace.
-func (v *PDInferenceServiceCustomValidator) validateProfileExists(ctx context.Context, name string) error {
+// validateProfileExists checks that the named PDEngineProfile exists in the given namespace.
+func (v *PDInferenceServiceCustomValidator) validateProfileExists(ctx context.Context, namespace, name string) error {
 	profile := &pdaiv1alpha1.PDEngineProfile{}
 	if err := v.Client.Get(ctx, types.NamespacedName{
-		Namespace: "pd-system",
+		Namespace: namespace,
 		Name:      name,
 	}, profile); err != nil {
-		return fmt.Errorf("PDEngineProfile %q not found in pd-system: %w", name, err)
+		return fmt.Errorf("PDEngineProfile %q not found in namespace %q: %w", name, namespace, err)
 	}
 	return nil
+}
+
+// validateVolumeMounts checks that every volumeMount.name in every role references
+// a volume defined in spec.volumes.
+func validateVolumeMounts(pdis *pdaiv1alpha1.PDInferenceService) field.ErrorList {
+	var errs field.ErrorList
+
+	volNames := make(map[string]bool, len(pdis.Spec.Volumes))
+	for _, v := range pdis.Spec.Volumes {
+		volNames[v.Name] = true
+	}
+
+	check := func(mounts []pdaiv1alpha1.VolumeMountSpec, rolePath string) {
+		for i, m := range mounts {
+			if !volNames[m.Name] {
+				errs = append(errs, field.Invalid(
+					field.NewPath("spec", rolePath, "volumeMounts").Index(i).Child("name"),
+					m.Name,
+					fmt.Sprintf("volume %q not defined in spec.volumes", m.Name),
+				))
+			}
+		}
+	}
+
+	check(pdis.Spec.Router.VolumeMounts, "router")
+	check(pdis.Spec.Prefill.VolumeMounts, "prefill")
+	check(pdis.Spec.Decode.VolumeMounts, "decode")
+
+	return errs
 }

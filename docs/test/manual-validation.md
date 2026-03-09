@@ -106,15 +106,15 @@ kubectl rollout status deploy/pd-manager-controller-manager -n pd-manager-system
 
 ### US-01：创建推理服务
 
-**目标**：创建一个完整的 PD 推理服务，三个角色（scheduler/prefill/decode）Pod 就绪。支持两种创建方式。
+**目标**：创建一个完整的 PD 推理服务，三个角色（router/prefill/decode）Pod 就绪。支持两种创建方式。
 
 ---
 
 #### 方式 A：kubectl apply（运维人员）
 
 ```bash
-# 1. 创建 PDInferenceService
-cat <<EOF | kubectl apply -f -
+# 1. 创建 PDInferenceService（使用新 CRD 结构，所有参数显式配置）
+cat <<'EOF' | kubectl apply -f -
 apiVersion: pdai.pdai.io/v1alpha1
 kind: PDInferenceService
 metadata:
@@ -122,62 +122,160 @@ metadata:
   namespace: default
 spec:
   model: Qwen/Qwen3-14B
-  modelStorage:
-    type: hostPath
-    hostPath: /data/model/qwen3-14b
-    mountPath: /models
-  images:
-    scheduler: lmsysorg/sgl-model-gateway:v0.3.1
-    prefill: lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
-    decode: lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
-  prefill:
-    replicas: 1
-    resources:
-      gpu: "2"
-      gpuType: a30
-  decode:
-    replicas: 1
-    resources:
-      gpu: "2"
-      gpuType: a30
+
+  volumes:
+  - name: model-storage
+    hostPath:
+      path: /data/model/qwen3-14b
+      type: Directory
+  - name: dshm
+    emptyDir:
+      medium: Memory
+      sizeLimit: 20Gi
+
   router:
-    strategy: round-robin
-  engineConfig:
-    tensorParallelSize: 2
-    kvTransfer:
-      backend: nixl
-    extraArgs:
-      prefill:
-        - --trust-remote-code
-        - --disable-radix-cache
-        - --mem-fraction-static
-        - "0.88"
-        - --chunked-prefill-size
-        - "8192"
-        - --page-size
-        - "128"
-        - --cuda-graph-max-bs
-        - "256"
-      decode:
-        - --trust-remote-code
-        - --disable-radix-cache
-        - --mem-fraction-static
-        - "0.88"
-        - --chunked-prefill-size
-        - "8192"
-        - --page-size
-        - "128"
-        - --cuda-graph-max-bs
-        - "256"
-      scheduler:
-        - --health-check-timeout-secs
-        - "6000000"
-        - --health-check-interval-secs
-        - "6000"
-        - --worker-startup-timeout-secs
-        - "3600"
-        - --worker-startup-check-interval
-        - "30"
+    image: lmsysorg/sgl-model-gateway:v0.3.1
+    replicas: 1
+    resources:
+      requests:
+        memory: 4Gi
+        cpu: "4"
+      limits:
+        memory: 4Gi
+        cpu: "4"
+    volumeMounts:
+    - name: model-storage
+      mountPath: /models
+    args:
+    - --pd-disaggregation
+    - --host
+    - 0.0.0.0
+    - --port
+    - "8000"
+    - --model-path
+    - /models
+    - --policy
+    - round-robin
+    - --health-check-timeout-secs
+    - "6000000"
+    - --worker-startup-timeout-secs
+    - "3600"
+    readinessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 30
+      periodSeconds: 10
+    livenessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 120
+      periodSeconds: 30
+
+  prefill:
+    image: lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
+    replicas: 1
+    gpu: "2"
+    gpuType: a30
+    resources:
+      requests:
+        memory: 96Gi
+        cpu: "16"
+      limits:
+        memory: 128Gi
+        cpu: "32"
+    volumeMounts:
+    - name: model-storage
+      mountPath: /models
+    - name: dshm
+      mountPath: /dev/shm
+    args:
+    - --model-path
+    - /models
+    - --trust-remote-code
+    - --disable-radix-cache
+    - --tp-size
+    - "2"
+    - --host
+    - $(POD_IP)
+    - --port
+    - "8000"
+    - --disaggregation-mode
+    - prefill
+    - --disaggregation-transfer-backend
+    - nixl
+    - --mem-fraction-static
+    - "0.88"
+    - --chunked-prefill-size
+    - "8192"
+    - --page-size
+    - "128"
+    - --cuda-graph-max-bs
+    - "256"
+    readinessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      failureThreshold: 10
+    livenessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 300
+      periodSeconds: 30
+      failureThreshold: 3
+
+  decode:
+    image: lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
+    replicas: 1
+    gpu: "2"
+    gpuType: a30
+    resources:
+      requests:
+        memory: 96Gi
+        cpu: "16"
+      limits:
+        memory: 128Gi
+        cpu: "32"
+    volumeMounts:
+    - name: model-storage
+      mountPath: /models
+    - name: dshm
+      mountPath: /dev/shm
+    args:
+    - --model-path
+    - /models
+    - --trust-remote-code
+    - --disable-radix-cache
+    - --tp-size
+    - "2"
+    - --host
+    - $(POD_IP)
+    - --port
+    - "8000"
+    - --disaggregation-mode
+    - decode
+    - --disaggregation-transfer-backend
+    - nixl
+    - --mem-fraction-static
+    - "0.88"
+    - --chunked-prefill-size
+    - "8192"
+    - --page-size
+    - "128"
+    - --cuda-graph-max-bs
+    - "256"
+    readinessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      failureThreshold: 10
+    livenessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 480
+      periodSeconds: 30
+      failureThreshold: 3
 EOF
 
 # 2. 观察状态变化（期望：Pending → Initializing）
@@ -199,37 +297,40 @@ PD_POD=$(kubectl get pod -n pd-manager-system -l control-plane=controller-manage
 kubectl port-forward -n pd-manager-system pod/${PD_POD} 8080:8080 &
 sleep 2
 
-# POST 创建推理服务
+# POST 创建推理服务（JSON 格式）
 curl -s -X POST http://localhost:8080/api/v1/pd-inference-services \
   -H 'Content-Type: application/json' \
   -d '{
-    "metadata": {
-      "name": "qwen3-14b",
-      "namespace": "default"
-    },
+    "apiVersion": "pdai.pdai.io/v1alpha1",
+    "kind": "PDInferenceService",
+    "metadata": {"name": "qwen3-14b", "namespace": "default"},
     "spec": {
       "model": "Qwen/Qwen3-14B",
-      "modelStorage": {
-        "type": "hostPath",
-        "hostPath": "/data/model/qwen3-14b",
-        "mountPath": "/models"
+      "volumes": [
+        {"name": "model-storage", "hostPath": {"path": "/data/model/qwen3-14b", "type": "Directory"}},
+        {"name": "dshm", "emptyDir": {"medium": "Memory", "sizeLimit": "20Gi"}}
+      ],
+      "router": {
+        "image": "lmsysorg/sgl-model-gateway:v0.3.1",
+        "replicas": 1,
+        "args": ["--pd-disaggregation","--host","0.0.0.0","--port","8000","--model-path","/models","--policy","round-robin"],
+        "volumeMounts": [{"name": "model-storage", "mountPath": "/models"}]
       },
-      "images": {
-        "scheduler": "lmsysorg/sgl-model-gateway:v0.3.1",
-        "prefill":   "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime",
-        "decode":    "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime"
+      "prefill": {
+        "image": "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime",
+        "replicas": 1,
+        "gpu": "2",
+        "gpuType": "a30",
+        "args": ["--model-path","/models","--trust-remote-code","--tp-size","2","--host","$(POD_IP)","--port","8000","--disaggregation-mode","prefill","--disaggregation-transfer-backend","nixl","--mem-fraction-static","0.88"],
+        "volumeMounts": [{"name":"model-storage","mountPath":"/models"},{"name":"dshm","mountPath":"/dev/shm"}]
       },
-      "prefill": {"replicas": 1, "resources": {"gpu": "2", "gpuType": "a30"}},
-      "decode":  {"replicas": 1, "resources": {"gpu": "2", "gpuType": "a30"}},
-      "router": {"strategy": "round-robin"},
-      "engineConfig": {
-        "tensorParallelSize": 2,
-        "kvTransfer": {"backend": "nixl"},
-        "extraArgs": {
-          "prefill":   ["--trust-remote-code","--disable-radix-cache","--mem-fraction-static","0.88","--chunked-prefill-size","8192","--page-size","128","--cuda-graph-max-bs","256"],
-          "decode":    ["--trust-remote-code","--disable-radix-cache","--mem-fraction-static","0.88","--chunked-prefill-size","8192","--page-size","128","--cuda-graph-max-bs","256"],
-          "scheduler": ["--health-check-timeout-secs","6000000","--health-check-interval-secs","6000","--worker-startup-timeout-secs","3600","--worker-startup-check-interval","30"]
-        }
+      "decode": {
+        "image": "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime",
+        "replicas": 1,
+        "gpu": "2",
+        "gpuType": "a30",
+        "args": ["--model-path","/models","--trust-remote-code","--tp-size","2","--host","$(POD_IP)","--port","8000","--disaggregation-mode","decode","--disaggregation-transfer-backend","nixl","--mem-fraction-static","0.88"],
+        "volumeMounts": [{"name":"model-storage","mountPath":"/models"},{"name":"dshm","mountPath":"/dev/shm"}]
       }
     }
   }' | python3 -m json.tool
@@ -245,8 +346,8 @@ curl -s http://localhost:8080/api/v1/pd-inference-services/qwen3-14b | python3 -
 **预期结果（两种方式相同）**：
 - PDInferenceService 创建成功，Phase 在 30s 内变为 Initializing
 - RBG 被自动创建：`kubectl get rbg qwen3-14b`
-- 6 个 Pod（scheduler×1、prefill×1、decode×1，每个各 2 GPU）启动后 Phase 变为 Running
-- scheduler Pod 日志出现 `Starting server` 或 `Uvicorn running`
+- 3 个 Pod（router×1、prefill×1、decode×1）启动后 Phase 变为 Running
+- router Pod 日志出现 `Starting server` 或类似启动信息
 
 ---
 
@@ -261,9 +362,9 @@ kubectl get pdis qwen3-14b -o yaml
 # 期望输出中包含：
 # status:
 #   phase: Running
-#   endpoint: <scheduler-service-ip>:8000
+#   endpoint: <router-service-ip>:8000
 #   roleStatuses:
-#   - name: scheduler
+#   - name: router
 #     ready: 1
 #     total: 1
 #   - name: prefill
@@ -274,8 +375,6 @@ kubectl get pdis qwen3-14b -o yaml
 #     total: 1
 
 # 方式二：REST API（通过 port-forward 访问 pd-manager，a30 无 LoadBalancer）
-kubectl port-forward -n pd-manager-system svc/pd-manager-controller-manager-metrics-service 8080:8080 &
-# 或直接 port-forward Pod
 PD_POD=$(kubectl get pod -n pd-manager-system -l control-plane=controller-manager -o jsonpath='{.items[0].metadata.name}')
 kubectl port-forward -n pd-manager-system pod/${PD_POD} 8080:8080 &
 sleep 2
@@ -289,7 +388,7 @@ curl http://localhost:8080/api/v1/pd-inference-services
 **预期结果**：
 - `status.phase = Running`
 - `status.endpoint` 有值（格式：`<IP>:8000`）
-- `roleStatuses` 包含 scheduler/prefill/decode，每个 ready=total
+- `roleStatuses` 包含 router/prefill/decode，每个 ready=total
 
 ---
 
@@ -347,7 +446,7 @@ kubectl get pdis,rbg -n default
 **预期结果**：
 - PDInferenceService 删除后，Finalizer 被移除
 - RBG 通过 ownerReference 级联删除
-- 所有 scheduler/prefill/decode Pod 消失
+- 所有 router/prefill/decode Pod 消失
 - 不留残余资源
 
 ---
@@ -357,7 +456,7 @@ kubectl get pdis,rbg -n default
 ### 场景 1：不存在的 Profile 引用
 
 ```bash
-# 创建引用不存在 Profile 的 PDIS
+# 创建引用不存在 Profile 的 PDIS（仅设置 engineProfileRef，不设置内联镜像/参数）
 cat <<EOF | kubectl apply -f -
 apiVersion: pdai.pdai.io/v1alpha1
 kind: PDInferenceService
@@ -367,17 +466,10 @@ metadata:
 spec:
   model: qwen3-14b
   engineProfileRef: nonexistent-profile
-  modelStorage:
-    type: hostPath
-    hostPath: /data/models
   prefill:
     replicas: 1
-    resources:
-      gpu: "1"
   decode:
     replicas: 1
-    resources:
-      gpu: "1"
 EOF
 
 # 期望：Status.Phase 变为 Failed，reason = ProfileResolveFailed
@@ -421,7 +513,7 @@ kubectl get pdis,rbg --all-namespaces
 |------|---------|------|
 | US-01 | kubectl apply 创建 PDIS，RBG 自动创建，Phase 变为 Running | ☐ |
 | US-01 | REST API POST 创建 PDIS，返回 201，资源正常创建 | ☐ |
-| US-01 | 三个角色（scheduler/prefill/decode）Pod 均 Running | ☐ |
+| US-01 | 三个角色（router/prefill/decode）Pod 均 Running | ☐ |
 | US-02 | kubectl 查询 phase=Running，endpoint 有值 | ☐ |
 | US-02 | REST API GET 返回 200，包含完整 status | ☐ |
 | US-03 | REST API PUT 修改 replicas 成功，RBG 同步更新 | ☐ |

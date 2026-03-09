@@ -25,23 +25,29 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// MergedConfig is the result of merging a PDEngineProfile (if any) with the
-// inline engineConfig of a PDInferenceService. The priority order is:
+// MergedConfig holds the resolved configuration after merging a PDEngineProfile
+// (if referenced) with the inline per-role configuration of a PDInferenceService.
 //
-//	pd-manager auto-inject (not here) > inline engineConfig > PDEngineProfile
-//
-// ExtraArgs are concatenated: Profile args first, inline args last. This allows
-// SGLang to use the last occurrence of a flag as the effective value.
+// Priority: inline CR fields > PDEngineProfile defaults.
+// For images and args: if the CR role field is non-empty, it takes full precedence
+// over the profile (no concatenation – profiles provide defaults, not additions).
 type MergedConfig struct {
-	Images             v1alpha1.RoleImages
-	TensorParallelSize *int32
-	KVTransfer         *v1alpha1.KVTransfer
-	ExtraArgs          v1alpha1.RoleExtraArgs
-	EngineRuntimes     *v1alpha1.RoleEngineRuntimes
+	// Images holds the resolved container image for each role.
+	Images v1alpha1.RoleImages
+
+	// RouterArgs is the resolved startup args for the router role.
+	RouterArgs []string
+	// PrefillArgs is the resolved startup args for the prefill role.
+	PrefillArgs []string
+	// DecodeArgs is the resolved startup args for the decode role.
+	DecodeArgs []string
+
+	// EngineRuntimes holds per-role sidecar injection config from the profile.
+	EngineRuntimes *v1alpha1.RoleEngineRuntimes
 }
 
-// Merger resolves the final engine configuration by merging a PDEngineProfile
-// (if referenced) with the inline engineConfig on a PDInferenceService.
+// Merger resolves the final configuration by merging a PDEngineProfile
+// (if referenced) with the inline per-role fields on a PDInferenceService.
 type Merger struct {
 	client client.Client
 }
@@ -51,11 +57,9 @@ func NewMerger(cl client.Client) *Merger {
 	return &Merger{client: cl}
 }
 
-// Resolve performs the three-tier merge for the given PDInferenceService:
-//  1. Load the referenced PDEngineProfile from pd-system namespace (if any).
-//  2. Apply inline structured fields (TensorParallelSize, KVTransfer) on top.
-//  3. Merge images (non-empty inline fields override profile fields).
-//  4. Concatenate extraArgs (profile first, inline last).
+// Resolve performs the two-tier merge for the given PDInferenceService:
+//  1. Load the referenced PDEngineProfile (if any) as defaults.
+//  2. Override with inline per-role fields (non-empty values take precedence).
 func (m *Merger) Resolve(ctx context.Context, pdis *v1alpha1.PDInferenceService) (*MergedConfig, error) {
 	merged := &MergedConfig{}
 
@@ -63,7 +67,7 @@ func (m *Merger) Resolve(ctx context.Context, pdis *v1alpha1.PDInferenceService)
 	if pdis.Spec.EngineProfileRef != "" {
 		profile := &v1alpha1.PDEngineProfile{}
 		if err := m.client.Get(ctx, types.NamespacedName{
-			Namespace: "pd-system",
+			Namespace: pdis.Namespace,
 			Name:      pdis.Spec.EngineProfileRef,
 		}, profile); err != nil {
 			return nil, fmt.Errorf("get profile %q: %w", pdis.Spec.EngineProfileRef, err)
@@ -71,33 +75,26 @@ func (m *Merger) Resolve(ctx context.Context, pdis *v1alpha1.PDInferenceService)
 		merged.applyProfile(profile)
 	}
 
-	// Step 2: Inline images — partial override (only non-empty fields win).
-	if img := pdis.Spec.Images; img != nil {
-		if img.Scheduler != "" {
-			merged.Images.Scheduler = img.Scheduler
-		}
-		if img.Prefill != "" {
-			merged.Images.Prefill = img.Prefill
-		}
-		if img.Decode != "" {
-			merged.Images.Decode = img.Decode
-		}
+	// Step 2: Inline per-role images override profile images (non-empty wins).
+	if pdis.Spec.Router.Image != "" {
+		merged.Images.Router = pdis.Spec.Router.Image
+	}
+	if pdis.Spec.Prefill.Image != "" {
+		merged.Images.Prefill = pdis.Spec.Prefill.Image
+	}
+	if pdis.Spec.Decode.Image != "" {
+		merged.Images.Decode = pdis.Spec.Decode.Image
 	}
 
-	// Step 3: Inline structured fields override profile (pointer non-nil = override).
-	if ec := pdis.Spec.EngineConfig; ec != nil {
-		if ec.TensorParallelSize != nil {
-			merged.TensorParallelSize = ec.TensorParallelSize
-		}
-		if ec.KVTransfer != nil {
-			merged.KVTransfer = ec.KVTransfer
-		}
-		// Step 4: Append inline extraArgs after profile extraArgs.
-		if ec.ExtraArgs != nil {
-			merged.ExtraArgs.Prefill = append(merged.ExtraArgs.Prefill, ec.ExtraArgs.Prefill...)
-			merged.ExtraArgs.Decode = append(merged.ExtraArgs.Decode, ec.ExtraArgs.Decode...)
-			merged.ExtraArgs.Scheduler = append(merged.ExtraArgs.Scheduler, ec.ExtraArgs.Scheduler...)
-		}
+	// Step 3: Inline per-role args override profile args (non-empty wins).
+	if len(pdis.Spec.Router.Args) > 0 {
+		merged.RouterArgs = pdis.Spec.Router.Args
+	}
+	if len(pdis.Spec.Prefill.Args) > 0 {
+		merged.PrefillArgs = pdis.Spec.Prefill.Args
+	}
+	if len(pdis.Spec.Decode.Args) > 0 {
+		merged.DecodeArgs = pdis.Spec.Decode.Args
 	}
 
 	return merged, nil
@@ -106,18 +103,10 @@ func (m *Merger) Resolve(ctx context.Context, pdis *v1alpha1.PDInferenceService)
 // applyProfile loads the base configuration from a PDEngineProfile.
 func (m *MergedConfig) applyProfile(profile *v1alpha1.PDEngineProfile) {
 	m.Images = profile.Spec.Images
-
-	ec := profile.Spec.EngineConfig
-	if ec.TensorParallelSize != nil {
-		m.TensorParallelSize = ec.TensorParallelSize
-	}
-	if ec.KVTransfer != nil {
-		m.KVTransfer = ec.KVTransfer
-	}
-	if ec.ExtraArgs != nil {
-		m.ExtraArgs.Prefill = append(m.ExtraArgs.Prefill, ec.ExtraArgs.Prefill...)
-		m.ExtraArgs.Decode = append(m.ExtraArgs.Decode, ec.ExtraArgs.Decode...)
-		m.ExtraArgs.Scheduler = append(m.ExtraArgs.Scheduler, ec.ExtraArgs.Scheduler...)
+	if ra := profile.Spec.RoleArgs; ra != nil {
+		m.RouterArgs = ra.Router
+		m.PrefillArgs = ra.Prefill
+		m.DecodeArgs = ra.Decode
 	}
 	m.EngineRuntimes = profile.Spec.EngineRuntimes
 }

@@ -1,0 +1,146 @@
+# Example: Qwen3-14B PD disaggregated inference on A30 GPUs
+# Two prefill + two decode instances, tensor parallelism = 2 per role
+apiVersion: pdai.pdai.io/v1alpha1
+kind: PDInferenceService
+metadata:
+  name: qwen3-14b
+  namespace: default
+spec:
+  model: Qwen/Qwen3-14B
+
+  # Shared volumes available to all roles via volumeMounts
+  volumes:
+  - name: model-storage
+    hostPath:
+      path: /data/model/qwen3-14b
+      type: Directory
+  - name: dshm
+    emptyDir:
+      medium: Memory
+      sizeLimit: 20Gi
+
+  router:
+    image: lmsysorg/sgl-model-gateway:v0.3.1
+    replicas: 1
+    resources:
+      requests:
+        memory: 4Gi
+        cpu: "4"
+      limits:
+        memory: 4Gi
+        cpu: "4"
+    volumeMounts:
+    - name: model-storage
+      mountPath: /models
+    args:
+    - --pd-disaggregation
+    - --host
+    - 0.0.0.0
+    - --port
+    - "8000"
+    - --model-path
+    - /models
+    - --policy
+    - round-robin
+    readinessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 30
+      periodSeconds: 10
+    livenessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 120
+      periodSeconds: 30
+
+  prefill:
+    image: lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
+    replicas: 1
+    gpu: "2"
+    gpuType: a30
+    resources:
+      requests:
+        memory: 96Gi
+        cpu: "16"
+      limits:
+        memory: 128Gi
+        cpu: "32"
+    volumeMounts:
+    - name: model-storage
+      mountPath: /models
+    - name: dshm
+      mountPath: /dev/shm
+    args:
+    - --model-path
+    - /models
+    - --trust-remote-code
+    - --tp-size
+    - "2"
+    - --host
+    - $(POD_IP)
+    - --port
+    - "8000"
+    - --disaggregation-mode
+    - prefill
+    - --disaggregation-transfer-backend
+    - nixl
+    - --mem-fraction-static
+    - "0.88"
+    readinessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      failureThreshold: 10
+    livenessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 300
+      periodSeconds: 30
+      failureThreshold: 3
+
+  decode:
+    image: lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
+    replicas: 1
+    gpu: "2"
+    gpuType: a30
+    resources:
+      requests:
+        memory: 96Gi
+        cpu: "16"
+      limits:
+        memory: 128Gi
+        cpu: "32"
+    volumeMounts:
+    - name: model-storage
+      mountPath: /models
+    - name: dshm
+      mountPath: /dev/shm
+    args:
+    - --model-path
+    - /models
+    - --trust-remote-code
+    - --tp-size
+    - "2"
+    - --host
+    - $(POD_IP)
+    - --port
+    - "8000"
+    - --disaggregation-mode
+    - decode
+    - --disaggregation-transfer-backend
+    - nixl
+    - --mem-fraction-static
+    - "0.88"
+    readinessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      failureThreshold: 10
+    livenessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 480
+      periodSeconds: 30
+      failureThreshold: 3

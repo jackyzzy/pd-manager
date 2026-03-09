@@ -86,50 +86,6 @@ spec:
               description:
                 description: Description is a human-readable description of this profile.
                 type: string
-              engineConfig:
-                description: EngineConfig provides the base engine configuration for
-                  this profile.
-                properties:
-                  extraArgs:
-                    description: RoleExtraArgs holds per-role extra arguments to pass
-                      to the inference engine.
-                    properties:
-                      decode:
-                        items:
-                          type: string
-                        type: array
-                      prefill:
-                        items:
-                          type: string
-                        type: array
-                      scheduler:
-                        items:
-                          type: string
-                        type: array
-                    type: object
-                  kvTransfer:
-                    description: KVTransfer configures the KV cache transfer between
-                      prefill and decode.
-                    properties:
-                      backend:
-                        allOf:
-                        - enum:
-                          - mooncake
-                          - nixl
-                          - nccl
-                        - enum:
-                          - mooncake
-                          - nixl
-                          - nccl
-                        description: Backend is the KV transfer backend.
-                        type: string
-                    required:
-                    - backend
-                    type: object
-                  tensorParallelSize:
-                    format: int32
-                    type: integer
-                type: object
               engineRuntimes:
                 description: EngineRuntimes are forwarded verbatim to the RBG roleSpec.engineRuntimes
                   field.
@@ -190,7 +146,7 @@ spec:
                       - profileName
                       type: object
                     type: array
-                  scheduler:
+                  router:
                     items:
                       description: |-
                         EngineRuntime maps to an RBG engineRuntime entry, enabling platform-specific
@@ -220,22 +176,45 @@ spec:
                     type: array
                 type: object
               images:
-                description: Images specifies the container images for each role.
+                description: |-
+                  Images specifies the container images for each role.
+                  Used as defaults when a PDInferenceService role's image field is empty.
                 properties:
                   decode:
                     type: string
                   prefill:
                     type: string
-                  scheduler:
+                  router:
                     type: string
                 required:
                 - decode
                 - prefill
-                - scheduler
+                - router
                 type: object
-            required:
-            - engineConfig
-            - images
+              roleArgs:
+                description: |-
+                  RoleArgs provides default startup args for each role.
+                  Used when a PDInferenceService role's args field is empty.
+                properties:
+                  decode:
+                    description: Decode holds default startup args for the decode
+                      role.
+                    items:
+                      type: string
+                    type: array
+                  prefill:
+                    description: Prefill holds default startup args for the prefill
+                      role.
+                    items:
+                      type: string
+                    type: array
+                  router:
+                    description: Router holds default startup args for the router
+                      role.
+                    items:
+                      type: string
+                    type: array
+                type: object
             type: object
           status:
             description: PDEngineProfileStatus defines the observed state of PDEngineProfile.
