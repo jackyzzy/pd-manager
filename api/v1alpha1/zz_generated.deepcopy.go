@@ -21,7 +21,8 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"k8s.io/apimachinery/pkg/apis/meta/v1"
+	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -158,6 +159,11 @@ func (in *InferenceRoleSpec) DeepCopyInto(out *InferenceRoleSpec) {
 	if in.VolumeMounts != nil {
 		in, out := &in.VolumeMounts, &out.VolumeMounts
 		*out = make([]VolumeMountSpec, len(*in))
+		copy(*out, *in)
+	}
+	if in.Command != nil {
+		in, out := &in.Command, &out.Command
+		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
 	if in.Args != nil {
@@ -603,6 +609,11 @@ func (in *RouterRoleSpec) DeepCopyInto(out *RouterRoleSpec) {
 		*out = make([]VolumeMountSpec, len(*in))
 		copy(*out, *in)
 	}
+	if in.Command != nil {
+		in, out := &in.Command, &out.Command
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.Args != nil {
 		in, out := &in.Args, &out.Args
 		*out = make([]string, len(*in))
@@ -637,6 +648,13 @@ func (in *RuntimeContainer) DeepCopyInto(out *RuntimeContainer) {
 		in, out := &in.Args, &out.Args
 		*out = make([]string, len(*in))
 		copy(*out, *in)
+	}
+	if in.Env != nil {
+		in, out := &in.Env, &out.Env
+		*out = make([]corev1.EnvVar, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
 	}
 }
 

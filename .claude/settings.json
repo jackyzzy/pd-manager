@@ -9,7 +9,15 @@
       "Bash(echo $GITHUB_TOKEN)",
       "Bash(env)",
       "Bash(printf \"protocol=https\\\\nhost=github.com\\\\n\")",
-      "Bash(rsync -avz --progress -e \"ssh -p 34451\" --exclude='.git' --exclude='bin/' --exclude='coverage.out' --exclude='coverage.html' /home/zzy/code/pd-manager/ a30@183.56.181.9:/home/a30/rbg-deployment/pd-manager/)"
+      "Bash(rsync -avz --progress -e \"ssh -p 34451\" --exclude='.git' --exclude='bin/' --exclude='coverage.out' --exclude='coverage.html' /home/zzy/code/pd-manager/ a30@183.56.181.9:/home/a30/rbg-deployment/pd-manager/)",
+      "Bash(/home/zzy/code/pd-manager/examples/qwen3-14b.yaml:*)",
+      "Bash(wait)",
+      "Read(//home/zzy/.kube/**)",
+      "Bash(ssh -o ConnectTimeout=30 -p 34451 a30@183.56.181.9 'kubectl get pods -n default | grep qwen3; echo \"\"---\"\"; tail -20 /tmp/e2e-output.log')",
+      "Bash(kind get clusters)"
+    ],
+    "additionalDirectories": [
+      "/tmp"
     ]
   }
 }

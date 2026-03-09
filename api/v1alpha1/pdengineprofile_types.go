@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -48,10 +49,11 @@ type ApplicabilitySpec struct {
 }
 
 // RuntimeContainer describes a single container override in an EngineRuntime.
-// The args are passed through to the RBG engineRuntimes field without parsing.
+// The args and env are passed through to the RBG engineRuntimes field without parsing.
 type RuntimeContainer struct {
-	Name string   `json:"name"`
-	Args []string `json:"args,omitempty"`
+	Name string          `json:"name"`
+	Args []string        `json:"args,omitempty"`
+	Env  []corev1.EnvVar `json:"env,omitempty"`
 }
 
 // EngineRuntime maps to an RBG engineRuntime entry, enabling platform-specific

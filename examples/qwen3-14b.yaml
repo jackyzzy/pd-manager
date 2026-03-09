@@ -1,5 +1,8 @@
-# Example: Qwen3-14B PD disaggregated inference on A30 GPUs
-# Two prefill + two decode instances, tensor parallelism = 2 per role
+# Example: Qwen3-14B PD disaggregated inference on A30 GPUs with Patio sidecar
+# Patio sidecar handles worker registration/deregistration with the router.
+# Prerequisites:
+#   - ClusterEngineRuntimeProfile "sglang-pd-runtime" must exist in the cluster
+#   - Model files at /data/model/qwen3-14b on the node
 apiVersion: pdai.pdai.io/v1alpha1
 kind: PDInferenceService
 metadata:
@@ -8,7 +11,6 @@ metadata:
 spec:
   model: Qwen/Qwen3-14B
 
-  # Shared volumes available to all roles via volumeMounts
   volumes:
   - name: model-storage
     hostPath:
@@ -33,6 +35,8 @@ spec:
     - name: model-storage
       mountPath: /models
     args:
+    - --log-level
+    - info
     - --pd-disaggregation
     - --host
     - 0.0.0.0
@@ -41,17 +45,25 @@ spec:
     - --model-path
     - /models
     - --policy
-    - round-robin
+    - random
+    - --prometheus-host
+    - 0.0.0.0
+    - --prometheus-port
+    - "9090"
     readinessProbe:
       httpPath: /health
       port: 8000
       initialDelaySeconds: 30
       periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
     livenessProbe:
       httpPath: /health
       port: 8000
       initialDelaySeconds: 120
       periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 3
 
   prefill:
     image: lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
@@ -70,10 +82,15 @@ spec:
       mountPath: /models
     - name: dshm
       mountPath: /dev/shm
+    command:
+    - python3
+    - -m
+    - sglang.launch_server
     args:
     - --model-path
     - /models
     - --trust-remote-code
+    - --disable-radix-cache
     - --tp-size
     - "2"
     - --host
@@ -86,18 +103,37 @@ spec:
     - nixl
     - --mem-fraction-static
     - "0.88"
+    - --chunked-prefill-size
+    - "8192"
+    - --page-size
+    - "128"
+    - --cuda-graph-max-bs
+    - "256"
     readinessProbe:
       httpPath: /health
       port: 8000
       initialDelaySeconds: 30
       periodSeconds: 10
+      timeoutSeconds: 5
       failureThreshold: 10
     livenessProbe:
       httpPath: /health
       port: 8000
       initialDelaySeconds: 300
       periodSeconds: 30
+      timeoutSeconds: 5
       failureThreshold: 3
+    engineRuntimes:
+    - profileName: sglang-pd-runtime
+      containers:
+      - name: patio-runtime
+        args:
+        - '--instance-info={"data":{"port":8000,"worker_type":"prefill","bootstrap_port":8998},"topo_type":"sglang"}'
+        env:
+        - name: SGL_ROUTER_PORT
+          value: "8000"
+        - name: ROLE_NAME
+          value: prefill
 
   decode:
     image: lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
@@ -116,10 +152,15 @@ spec:
       mountPath: /models
     - name: dshm
       mountPath: /dev/shm
+    command:
+    - python3
+    - -m
+    - sglang.launch_server
     args:
     - --model-path
     - /models
     - --trust-remote-code
+    - --disable-radix-cache
     - --tp-size
     - "2"
     - --host
@@ -132,15 +173,34 @@ spec:
     - nixl
     - --mem-fraction-static
     - "0.88"
+    - --chunked-prefill-size
+    - "8192"
+    - --page-size
+    - "128"
+    - --cuda-graph-max-bs
+    - "256"
     readinessProbe:
       httpPath: /health
       port: 8000
       initialDelaySeconds: 30
       periodSeconds: 10
+      timeoutSeconds: 5
       failureThreshold: 10
     livenessProbe:
       httpPath: /health
       port: 8000
       initialDelaySeconds: 480
       periodSeconds: 30
+      timeoutSeconds: 5
       failureThreshold: 3
+    engineRuntimes:
+    - profileName: sglang-pd-runtime
+      containers:
+      - name: patio-runtime
+        args:
+        - '--instance-info={"data":{"port":8000,"worker_type":"decode"},"topo_type":"sglang"}'
+        env:
+        - name: SGL_ROUTER_PORT
+          value: "8000"
+        - name: ROLE_NAME
+          value: decode

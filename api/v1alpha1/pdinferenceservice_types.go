@@ -134,6 +134,10 @@ type RouterRoleSpec struct {
 	// VolumeMounts lists volume mounts referencing volumes defined in spec.volumes.
 	VolumeMounts []VolumeMountSpec `json:"volumeMounts,omitempty"`
 
+	// Command overrides the container entrypoint (corresponds to Kubernetes container.command).
+	// Optional. When set together with Args, Command replaces the image ENTRYPOINT.
+	Command []string `json:"command,omitempty"`
+
 	// Args are the complete startup arguments passed to the router container.
 	// Required (either here or via engineProfileRef).
 	Args []string `json:"args,omitempty"`
@@ -169,6 +173,10 @@ type InferenceRoleSpec struct {
 
 	// VolumeMounts lists volume mounts referencing volumes defined in spec.volumes.
 	VolumeMounts []VolumeMountSpec `json:"volumeMounts,omitempty"`
+
+	// Command overrides the container entrypoint (corresponds to Kubernetes container.command).
+	// Optional. When set together with Args, Command replaces the image ENTRYPOINT.
+	Command []string `json:"command,omitempty"`
 
 	// Args are the complete startup arguments passed to the inference container.
 	// pd-manager does not auto-inject engine args; all args must be specified here

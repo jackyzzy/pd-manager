@@ -113,7 +113,10 @@ kubectl rollout status deploy/pd-manager-controller-manager -n pd-manager-system
 #### 方式 A：kubectl apply（运维人员）
 
 ```bash
-# 1. 创建 PDInferenceService（使用新 CRD 结构，所有参数显式配置）
+# 前置条件：确认 ClusterEngineRuntimeProfile sglang-pd-runtime 存在
+kubectl get clusterengineruntimeprofile sglang-pd-runtime
+
+# 1. 创建 PDInferenceService（含 patio sidecar，command/args 分离）
 cat <<'EOF' | kubectl apply -f -
 apiVersion: pdai.pdai.io/v1alpha1
 kind: PDInferenceService
@@ -147,6 +150,8 @@ spec:
     - name: model-storage
       mountPath: /models
     args:
+    - --log-level
+    - info
     - --pd-disaggregation
     - --host
     - 0.0.0.0
@@ -155,21 +160,25 @@ spec:
     - --model-path
     - /models
     - --policy
-    - round-robin
-    - --health-check-timeout-secs
-    - "6000000"
-    - --worker-startup-timeout-secs
-    - "3600"
+    - random
+    - --prometheus-host
+    - 0.0.0.0
+    - --prometheus-port
+    - "9090"
     readinessProbe:
       httpPath: /health
       port: 8000
       initialDelaySeconds: 30
       periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
     livenessProbe:
       httpPath: /health
       port: 8000
       initialDelaySeconds: 120
       periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 3
 
   prefill:
     image: lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
@@ -188,6 +197,10 @@ spec:
       mountPath: /models
     - name: dshm
       mountPath: /dev/shm
+    command:
+    - python3
+    - -m
+    - sglang.launch_server
     args:
     - --model-path
     - /models
@@ -216,13 +229,26 @@ spec:
       port: 8000
       initialDelaySeconds: 30
       periodSeconds: 10
+      timeoutSeconds: 5
       failureThreshold: 10
     livenessProbe:
       httpPath: /health
       port: 8000
       initialDelaySeconds: 300
       periodSeconds: 30
+      timeoutSeconds: 5
       failureThreshold: 3
+    engineRuntimes:
+    - profileName: sglang-pd-runtime
+      containers:
+      - name: patio-runtime
+        args:
+        - '--instance-info={"data":{"port":8000,"worker_type":"prefill","bootstrap_port":8998},"topo_type":"sglang"}'
+        env:
+        - name: SGL_ROUTER_PORT
+          value: "8000"
+        - name: ROLE_NAME
+          value: prefill
 
   decode:
     image: lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
@@ -241,6 +267,10 @@ spec:
       mountPath: /models
     - name: dshm
       mountPath: /dev/shm
+    command:
+    - python3
+    - -m
+    - sglang.launch_server
     args:
     - --model-path
     - /models
@@ -269,13 +299,26 @@ spec:
       port: 8000
       initialDelaySeconds: 30
       periodSeconds: 10
+      timeoutSeconds: 5
       failureThreshold: 10
     livenessProbe:
       httpPath: /health
       port: 8000
       initialDelaySeconds: 480
       periodSeconds: 30
+      timeoutSeconds: 5
       failureThreshold: 3
+    engineRuntimes:
+    - profileName: sglang-pd-runtime
+      containers:
+      - name: patio-runtime
+        args:
+        - '--instance-info={"data":{"port":8000,"worker_type":"decode"},"topo_type":"sglang"}'
+        env:
+        - name: SGL_ROUTER_PORT
+          value: "8000"
+        - name: ROLE_NAME
+          value: decode
 EOF
 
 # 2. 观察状态变化（期望：Pending → Initializing）
@@ -347,7 +390,8 @@ curl -s http://localhost:8080/api/v1/pd-inference-services/qwen3-14b | python3 -
 - PDInferenceService 创建成功，Phase 在 30s 内变为 Initializing
 - RBG 被自动创建：`kubectl get rbg qwen3-14b`
 - 3 个 Pod（router×1、prefill×1、decode×1）启动后 Phase 变为 Running
-- router Pod 日志出现 `Starting server` 或类似启动信息
+- prefill/decode Pod 各包含 `patio-runtime` sidecar 容器
+- router Pod 日志出现启动信息，patio sidecar 日志显示注册成功
 
 ---
 
@@ -451,6 +495,75 @@ kubectl get pdis,rbg -n default
 
 ---
 
+### US-05：Patio 路由注册验证 + 推理接口验证
+
+**目标**：确认 patio sidecar 成功将 prefill/decode 注册到 router，并通过推理接口验证端到端服务正常。
+
+> 前置：US-01 已完成，所有 Pod Running。
+
+#### 1. 确认 patio sidecar 注入
+
+```bash
+# 确认 prefill Pod 包含 patio-runtime 容器
+kubectl get pod qwen3-14b-prefill-0 -o jsonpath='{.spec.containers[*].name}'
+# 期望输出包含：prefill patio-runtime
+
+kubectl get pod qwen3-14b-decode-0 -o jsonpath='{.spec.containers[*].name}'
+# 期望输出包含：decode patio-runtime
+```
+
+#### 2. 查看 patio sidecar 日志
+
+```bash
+# 查看 prefill patio-runtime 日志（应显示注册到 router 的信息）
+kubectl logs qwen3-14b-prefill-0 -c patio-runtime --tail=50
+
+# 查看 decode patio-runtime 日志
+kubectl logs qwen3-14b-decode-0 -c patio-runtime --tail=50
+
+# 期望日志包含类似：registered / add worker / connected to router 等字样
+```
+
+#### 3. Port-forward router，验证 worker 注册
+
+```bash
+# port-forward router Pod
+kubectl port-forward pod/qwen3-14b-router-0 8000:8000 &
+sleep 3
+
+# 查询 router 已注册的 worker（prefill + decode）
+curl -s http://localhost:8000/get_server_info | python3 -m json.tool
+# 期望：包含 prefill_server_urls 和 decode_server_urls，各有 1 个 worker URL
+```
+
+#### 4. 推理接口端到端验证
+
+```bash
+# 发送推理请求（需等待所有 Pod Ready）
+curl -s http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen3-14B",
+    "messages": [{"role": "user", "content": "Hello, what is 1+1?"}],
+    "max_tokens": 50,
+    "temperature": 0
+  }' | python3 -m json.tool
+
+# 期望：返回 200，choices[0].message.content 包含有意义的回答
+
+# 验证健康检查
+curl -s http://localhost:8000/health
+# 期望：{"status": "ok"} 或 200 OK
+```
+
+**预期结果**：
+- prefill/decode Pod 各含 2 个容器（主容器 + patio-runtime sidecar）
+- patio 日志显示向 router 注册成功
+- `get_server_info` 返回的 prefill/decode URL 列表非空
+- 推理请求返回正常回答
+
+---
+
 ## 异常场景验证
 
 ### 场景 1：不存在的 Profile 引用
@@ -514,10 +627,14 @@ kubectl get pdis,rbg --all-namespaces
 | US-01 | kubectl apply 创建 PDIS，RBG 自动创建，Phase 变为 Running | ☐ |
 | US-01 | REST API POST 创建 PDIS，返回 201，资源正常创建 | ☐ |
 | US-01 | 三个角色（router/prefill/decode）Pod 均 Running | ☐ |
+| US-01 | prefill/decode Pod 各含 patio-runtime sidecar 容器 | ☐ |
 | US-02 | kubectl 查询 phase=Running，endpoint 有值 | ☐ |
 | US-02 | REST API GET 返回 200，包含完整 status | ☐ |
 | US-03 | REST API PUT 修改 replicas 成功，RBG 同步更新 | ☐ |
 | US-03 | 修改 model 被拒绝（400），错误含 "immutable" | ☐ |
 | US-04 | 删除后 RBG 级联删除，所有 Pod 消失 | ☐ |
+| US-05 | patio 日志显示注册成功 | ☐ |
+| US-05 | router get_server_info 包含 prefill/decode worker URL | ☐ |
+| US-05 | 推理接口返回正常回答 | ☐ |
 | 异常 | 无效 Profile 引用 → Status.Phase = Failed | ☐ |
 | 异常 | 不可变字段修改被 Webhook 拒绝 | ☐ |

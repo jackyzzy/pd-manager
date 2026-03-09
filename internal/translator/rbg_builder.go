@@ -96,13 +96,14 @@ func (b *RBGBuilder) buildRouterRole(pdis *v1alpha1.PDInferenceService, cfg *con
 					Volumes: volumes,
 					Containers: []corev1.Container{
 						{
-							Name:            "router",
-							Image:           cfg.Images.Router,
-							Args:            cfg.RouterArgs,
-							VolumeMounts:    volumeMounts,
-							Resources:       resources,
-							ReadinessProbe:  buildProbe(pdis.Spec.Router.ReadinessProbe),
-							LivenessProbe:   buildProbe(pdis.Spec.Router.LivenessProbe),
+							Name:           "router",
+							Image:          cfg.Images.Router,
+							Command:        pdis.Spec.Router.Command,
+							Args:           cfg.RouterArgs,
+							VolumeMounts:   volumeMounts,
+							Resources:      resources,
+							ReadinessProbe: buildProbe(pdis.Spec.Router.ReadinessProbe),
+							LivenessProbe:  buildProbe(pdis.Spec.Router.LivenessProbe),
 						},
 					},
 				},
@@ -144,6 +145,7 @@ func (b *RBGBuilder) buildInferenceRole(
 			{
 				Name:           roleName,
 				Image:          image,
+				Command:        roleSpec.Command,
 				Args:           args,
 				Env:            env,
 				Resources:      resources,
@@ -299,6 +301,7 @@ func convertEngineRuntimes(runtimes []v1alpha1.EngineRuntime) []rbgv1alpha1.Engi
 			rbgrt.Containers = append(rbgrt.Containers, corev1.Container{
 				Name: c.Name,
 				Args: c.Args,
+				Env:  c.Env,
 			})
 		}
 		result = append(result, rbgrt)
