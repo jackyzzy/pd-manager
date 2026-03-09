@@ -104,9 +104,9 @@ spec:
     - --policy
     - round_robin
     - --prefill
-    - %s-prefill-0.s-%s-prefill.%s.svc.cluster.local:8000
+    - http://%s-prefill-0.s-%s-prefill.%s.svc.cluster.local:8000
     - --decode
-    - %s-decode-0.s-%s-decode.%s.svc.cluster.local:8000
+    - http://%s-decode-0.s-%s-decode.%s.svc.cluster.local:8000
     - --worker-startup-timeout-secs
     - "3600"
     - --worker-startup-check-interval
@@ -137,6 +137,9 @@ spec:
     - name: dshm
       mountPath: /dev/shm
     args:
+    - python3
+    - -m
+    - sglang.launch_server
     - --model-path
     - /models
     - --served-model-name
@@ -166,6 +169,7 @@ spec:
       port: 8000
       initialDelaySeconds: 30
       periodSeconds: 10
+      timeoutSeconds: 5
       failureThreshold: 10
 
   decode:
@@ -182,6 +186,9 @@ spec:
     - name: dshm
       mountPath: /dev/shm
     args:
+    - python3
+    - -m
+    - sglang.launch_server
     - --model-path
     - /models
     - --served-model-name
@@ -211,6 +218,7 @@ spec:
       port: 8000
       initialDelaySeconds: 30
       periodSeconds: 10
+      timeoutSeconds: 5
       failureThreshold: 10
 `,
 	testServiceName, testNamespace,
@@ -248,8 +256,20 @@ func podLogsContain(podName, namespace string, needles ...string) bool {
 	return false
 }
 
+// podUID returns the UID of the current pod instance.
+func podUID(podName, namespace string) string {
+	out, err := kubectl("get", "pod", podName, "-n", namespace,
+		"-o", "jsonpath={.metadata.uid}")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
 // podHasError returns an error description if the pod logs contain a Python
 // traceback, CUDA OOM, or the pod's last state is a fatal failure.
+// Events are filtered by the current pod's UID to avoid stale events from
+// previous pod instances with the same name.
 func podHasError(podName, namespace string) string {
 	// Check logs for Python exceptions or CUDA OOM
 	out, err := kubectl("logs", podName, "-n", namespace, "--tail=100")
@@ -265,20 +285,30 @@ func podHasError(podName, namespace string) string {
 		}
 	}
 
-	// Check pod events for Warning reasons that indicate permanent failure
+	// Get current pod UID to filter out stale events from previous pod instances.
+	currentUID := podUID(podName, namespace)
+
+	// Check pod events for Warning reasons that indicate permanent failure.
 	events, err := kubectl("get", "events", "-n", namespace,
 		"--field-selector", "involvedObject.name="+podName,
 		"--sort-by=.lastTimestamp", "-o", "json")
 	if err == nil {
 		var evList struct {
 			Items []struct {
-				Type    string `json:"type"`
-				Reason  string `json:"reason"`
-				Message string `json:"message"`
+				Type             string `json:"type"`
+				Reason           string `json:"reason"`
+				Message          string `json:"message"`
+				InvolvedObject   struct {
+					UID string `json:"uid"`
+				} `json:"involvedObject"`
 			} `json:"items"`
 		}
 		if json.Unmarshal([]byte(events), &evList) == nil {
 			for _, ev := range evList.Items {
+				// Skip events from previous pod instances (stale).
+				if currentUID != "" && ev.InvolvedObject.UID != currentUID {
+					continue
+				}
 				if ev.Type == "Warning" {
 					switch ev.Reason {
 					case "OOMKilled", "CrashLoopBackOff", "BackOff", "Failed":
@@ -299,6 +329,16 @@ func podPhase(podName, namespace string) string {
 		return ""
 	}
 	return strings.TrimSpace(out)
+}
+
+// podReady returns true when the pod's Ready condition is True.
+func podReady(podName, namespace string) bool {
+	out, err := kubectl("get", "pod", podName, "-n", namespace,
+		"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(out) == "True"
 }
 
 // podContainerState returns "running", "waiting/<reason>", "terminated/<reason>"
@@ -345,18 +385,24 @@ func routerServiceName() string {
 	return fmt.Sprintf("s-%s-router", testServiceName)
 }
 
-// portForwardRouter starts kubectl port-forward for the router service
-// and returns a cancel func.  Callers must invoke cancel() when done.
+// portForwardRouter starts kubectl port-forward for the router pod directly
+// (pod/ is more reliable than svc/ for headless services) and returns a cancel func.
 func portForwardRouter() (localAddr string, cancel context.CancelFunc) {
+	// Get the router pod name first
+	podName := fmt.Sprintf("%s-router-0", testServiceName)
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, "kubectl", "port-forward",
-		"svc/"+routerServiceName(),
+		"pod/"+podName,
 		routerLocalPort+":8000",
 		"-n", testNamespace,
 	)
-	_ = cmd.Start()
+	cmd.Stdout = GinkgoWriter
+	cmd.Stderr = GinkgoWriter
+	if err := cmd.Start(); err != nil {
+		GinkgoWriter.Printf("port-forward start error: %v\n", err)
+	}
 	// Give port-forward time to establish
-	time.Sleep(3 * time.Second)
+	time.Sleep(5 * time.Second)
 	return "http://localhost:" + routerLocalPort, cancel
 }
 
@@ -510,8 +556,10 @@ var _ = Describe("PDInferenceService Business E2E", Ordered, func() {
 			}
 		})
 
-		It("should have all pods Running within the GPU startup timeout", func() {
+		It("should have all pods Running and Ready within the GPU startup timeout", func() {
 			// GPU model loading takes ~15-20 min for Qwen3-14B with tp=2.
+			// We check both Running phase AND readiness (probe passing) so that the
+			// subsequent phase=Running PDIS check does not time out.
 			for _, role := range []string{"router", "prefill", "decode"} {
 				role := role
 				Eventually(func(g Gomega) {
@@ -521,6 +569,8 @@ var _ = Describe("PDInferenceService Business E2E", Ordered, func() {
 						phase := podPhase(pod, testNamespace)
 						g.Expect(phase).To(Equal("Running"),
 							"pod %s (role %s) phase is %q, not Running", pod, role, phase)
+						g.Expect(podReady(pod, testNamespace)).To(BeTrue(),
+							"pod %s (role %s) is not Ready yet", pod, role)
 					}
 				}, podTimeout, 30*time.Second).Should(Succeed())
 			}
@@ -546,7 +596,7 @@ var _ = Describe("PDInferenceService Business E2E", Ordered, func() {
 				out, _ := kubectl("get", "pdinferenceservice", testServiceName,
 					"-n", testNamespace, "-o", "jsonpath={.status.phase}")
 				return strings.TrimSpace(out)
-			}, 2*time.Minute, 10*time.Second).Should(Equal("Running"))
+			}, 5*time.Minute, 10*time.Second).Should(Equal("Running"))
 		})
 	})
 
