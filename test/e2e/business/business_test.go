@@ -102,11 +102,11 @@ spec:
     - --model-path
     - /models
     - --policy
-    - round-robin
-    - --health-check-timeout-secs
-    - "6000000"
-    - --health-check-interval-secs
-    - "6000"
+    - round_robin
+    - --prefill
+    - %s-prefill-0.s-%s-prefill.%s.svc.cluster.local:8000
+    - --decode
+    - %s-decode-0.s-%s-decode.%s.svc.cluster.local:8000
     - --worker-startup-timeout-secs
     - "3600"
     - --worker-startup-check-interval
@@ -217,6 +217,9 @@ spec:
 	servedModelName,
 	modelPath,
 	routerImage,
+	// prefill/decode worker URLs (StatefulSet headless service DNS)
+	testServiceName, testServiceName, testNamespace,
+	testServiceName, testServiceName, testNamespace,
 	prefillImage,
 	servedModelName,
 	decodeImage,
