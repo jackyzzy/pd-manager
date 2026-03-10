@@ -94,6 +94,21 @@ make deploy IMG=pd-manager:v0.0.1
 kubectl rollout status deploy/pd-manager-controller-manager -n pd-manager-system --timeout=60s
 ```
 
+### 4. 设置 pd-manager REST API 访问
+
+pd-manager REST API 在 pod 内监听 8080 端口。设置 port-forward 到本地 18010 端口后即可使用：
+
+```bash
+# 设置 pd-manager REST API port-forward（后台运行）
+PD_POD=$(kubectl get pod -n pd-manager-system -l control-plane=controller-manager -o jsonpath='{.items[0].metadata.name}')
+kubectl port-forward -n pd-manager-system pod/${PD_POD} --address=0.0.0.0 18010:8080 &
+
+# 验证访问
+curl http://127.0.0.1:18010/api/v1/pd-inference-services | jq .
+```
+
+> **注意**：pod 重启后 port-forward 会断开，需重新执行上述命令。
+
 > **Webhook TLS**：a30 无 cert-manager，需手动配置自签证书。若 Pod 因 TLS 报错无法启动，参考以下命令生成并挂载：
 > ```bash
 > openssl req -x509 -newkey rsa:4096 -keyout tls.key -out tls.crt -days 365 -nodes -subj "/CN=pd-manager-webhook-service.pd-manager-system.svc"
@@ -332,56 +347,100 @@ kubectl wait pdis qwen3-14b --for=jsonpath='.status.phase'=Running --timeout=30m
 
 #### 方式 B：REST API POST（前端页面 / 程序调用）
 
-> 前置：先 port-forward pd-manager 到本地（见 US-02）。
+> 前置：已按部署步骤第 4 步设置好 pd-manager REST API port-forward（18010:8080）。
+
+> **注意**：prefill/decode 必须使用 `command` + `args` 分离，以及 `engineRuntimes`（patio sidecar）。
+> sglang 镜像 ENTRYPOINT 是 `/opt/nvidia/nvidia_entrypoint.sh`，启动命令必须放在 `command` 字段，
+> 否则推理实例无法正常启动（args 会被当成 entrypoint 的参数而非执行命令）。
 
 ```bash
-# port-forward pd-manager API 服务
-PD_POD=$(kubectl get pod -n pd-manager-system -l control-plane=controller-manager -o jsonpath='{.items[0].metadata.name}')
-kubectl port-forward -n pd-manager-system pod/${PD_POD} 8080:8080 &
-sleep 2
-
-# POST 创建推理服务（JSON 格式）
-curl -s -X POST http://localhost:8080/api/v1/pd-inference-services \
+# POST 创建推理服务
+curl -s -X POST http://localhost:18010/api/v1/pd-inference-services \
   -H 'Content-Type: application/json' \
-  -d '{
-    "apiVersion": "pdai.pdai.io/v1alpha1",
-    "kind": "PDInferenceService",
-    "metadata": {"name": "qwen3-14b", "namespace": "default"},
-    "spec": {
-      "model": "Qwen/Qwen3-14B",
-      "volumes": [
-        {"name": "model-storage", "hostPath": {"path": "/data/model/qwen3-14b", "type": "Directory"}},
-        {"name": "dshm", "emptyDir": {"medium": "Memory", "sizeLimit": "20Gi"}}
-      ],
-      "router": {
-        "image": "lmsysorg/sgl-model-gateway:v0.3.1",
-        "replicas": 1,
-        "args": ["--pd-disaggregation","--host","0.0.0.0","--port","8000","--model-path","/models","--policy","round-robin"],
-        "volumeMounts": [{"name": "model-storage", "mountPath": "/models"}]
-      },
-      "prefill": {
-        "image": "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime",
-        "replicas": 1,
-        "gpu": "2",
-        "gpuType": "a30",
-        "args": ["--model-path","/models","--trust-remote-code","--tp-size","2","--host","$(POD_IP)","--port","8000","--disaggregation-mode","prefill","--disaggregation-transfer-backend","nixl","--mem-fraction-static","0.88"],
-        "volumeMounts": [{"name":"model-storage","mountPath":"/models"},{"name":"dshm","mountPath":"/dev/shm"}]
-      },
-      "decode": {
-        "image": "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime",
-        "replicas": 1,
-        "gpu": "2",
-        "gpuType": "a30",
-        "args": ["--model-path","/models","--trust-remote-code","--tp-size","2","--host","$(POD_IP)","--port","8000","--disaggregation-mode","decode","--disaggregation-transfer-backend","nixl","--mem-fraction-static","0.88"],
-        "volumeMounts": [{"name":"model-storage","mountPath":"/models"},{"name":"dshm","mountPath":"/dev/shm"}]
-      }
+  -d @- << 'JSON'
+{
+  "apiVersion": "pdai.pdai.io/v1alpha1",
+  "kind": "PDInferenceService",
+  "metadata": {"name": "qwen3-14b", "namespace": "default"},
+  "spec": {
+    "model": "Qwen/Qwen3-14B",
+    "volumes": [
+      {"name": "model-storage", "hostPath": {"path": "/data/model/qwen3-14b", "type": "Directory"}},
+      {"name": "dshm", "emptyDir": {"medium": "Memory", "sizeLimit": "20Gi"}}
+    ],
+    "router": {
+      "image": "lmsysorg/sgl-model-gateway:v0.3.1",
+      "replicas": 1,
+      "resources": {"requests": {"memory": "4Gi", "cpu": "4"}, "limits": {"memory": "4Gi", "cpu": "4"}},
+      "volumeMounts": [{"name": "model-storage", "mountPath": "/models"}],
+      "args": ["--log-level","info","--pd-disaggregation","--host","0.0.0.0","--port","8000",
+               "--model-path","/models","--policy","random",
+               "--prometheus-host","0.0.0.0","--prometheus-port","9090"],
+      "readinessProbe": {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 30,
+                         "periodSeconds": 10, "timeoutSeconds": 5, "failureThreshold": 3},
+      "livenessProbe":  {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 120,
+                         "periodSeconds": 30, "timeoutSeconds": 5, "failureThreshold": 3}
+    },
+    "prefill": {
+      "image": "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime",
+      "replicas": 1,
+      "gpu": "2",
+      "gpuType": "a30",
+      "resources": {"requests": {"memory": "96Gi", "cpu": "16"}, "limits": {"memory": "128Gi", "cpu": "32"}},
+      "volumeMounts": [{"name": "model-storage", "mountPath": "/models"}, {"name": "dshm", "mountPath": "/dev/shm"}],
+      "command": ["python3", "-m", "sglang.launch_server"],
+      "args": ["--model-path","/models","--trust-remote-code","--disable-radix-cache",
+               "--tp-size","2","--host","$(POD_IP)","--port","8000",
+               "--disaggregation-mode","prefill","--disaggregation-transfer-backend","nixl",
+               "--mem-fraction-static","0.88","--chunked-prefill-size","8192",
+               "--page-size","128","--cuda-graph-max-bs","256"],
+      "readinessProbe": {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 30,
+                         "periodSeconds": 10, "timeoutSeconds": 5, "failureThreshold": 10},
+      "livenessProbe":  {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 300,
+                         "periodSeconds": 30, "timeoutSeconds": 5, "failureThreshold": 3},
+      "engineRuntimes": [{
+        "profileName": "sglang-pd-runtime",
+        "containers": [{
+          "name": "patio-runtime",
+          "args": ["--instance-info={\"data\":{\"port\":8000,\"worker_type\":\"prefill\",\"bootstrap_port\":8998},\"topo_type\":\"sglang\"}"],
+          "env": [{"name": "SGL_ROUTER_PORT", "value": "8000"}, {"name": "ROLE_NAME", "value": "prefill"}]
+        }]
+      }]
+    },
+    "decode": {
+      "image": "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime",
+      "replicas": 1,
+      "gpu": "2",
+      "gpuType": "a30",
+      "resources": {"requests": {"memory": "96Gi", "cpu": "16"}, "limits": {"memory": "128Gi", "cpu": "32"}},
+      "volumeMounts": [{"name": "model-storage", "mountPath": "/models"}, {"name": "dshm", "mountPath": "/dev/shm"}],
+      "command": ["python3", "-m", "sglang.launch_server"],
+      "args": ["--model-path","/models","--trust-remote-code","--disable-radix-cache",
+               "--tp-size","2","--host","$(POD_IP)","--port","8000",
+               "--disaggregation-mode","decode","--disaggregation-transfer-backend","nixl",
+               "--mem-fraction-static","0.88","--chunked-prefill-size","8192",
+               "--page-size","128","--cuda-graph-max-bs","256"],
+      "readinessProbe": {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 30,
+                         "periodSeconds": 10, "timeoutSeconds": 5, "failureThreshold": 10},
+      "livenessProbe":  {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 480,
+                         "periodSeconds": 30, "timeoutSeconds": 5, "failureThreshold": 3},
+      "engineRuntimes": [{
+        "profileName": "sglang-pd-runtime",
+        "containers": [{
+          "name": "patio-runtime",
+          "args": ["--instance-info={\"data\":{\"port\":8000,\"worker_type\":\"decode\"},\"topo_type\":\"sglang\"}"],
+          "env": [{"name": "SGL_ROUTER_PORT", "value": "8000"}, {"name": "ROLE_NAME", "value": "decode"}]
+        }]
+      }]
     }
-  }' | python3 -m json.tool
+  }
+}
+JSON
 
 # 期望：HTTP 201，响应体包含创建后的资源（含 metadata.name）
 
 # 查询创建结果
-curl -s http://localhost:8080/api/v1/pd-inference-services/qwen3-14b | python3 -m json.tool
+curl -s http://localhost:18010/api/v1/pd-inference-services/qwen3-14b | python3 -m json.tool
 ```
 
 ---
@@ -392,6 +451,25 @@ curl -s http://localhost:8080/api/v1/pd-inference-services/qwen3-14b | python3 -
 - 3 个 Pod（router×1、prefill×1、decode×1）启动后 Phase 变为 Running
 - prefill/decode Pod 各包含 `patio-runtime` sidecar 容器
 - router Pod 日志出现启动信息，patio sidecar 日志显示注册成功
+
+#### 服务就绪后：设置 router 业务访问
+
+所有 Pod Running 后，设置 port-forward 以访问推理业务（router 监听 pod 内 8000 端口）：
+
+```bash
+# 设置 sgl-router 业务访问 port-forward（后台运行）
+kubectl port-forward pod/qwen3-14b-router-0 --address=0.0.0.0 18001:8000 &
+sleep 2
+
+# 验证 router 中注册的 worker 数量（期望：prefill=1, decode=1）
+curl http://127.0.0.1:18001/workers | jq '{prefill: .stats.prefill_count, decode: .stats.decode_count, total: .total}'
+
+# 验证推理服务能力
+curl -s http://127.0.0.1:18001/v1/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "Qwen/Qwen3-14B", "prompt": "1+1=", "max_tokens": 10}' | jq .choices[0].text
+# 期望：返回有意义的数学答案
+```
 
 ---
 
@@ -406,7 +484,6 @@ kubectl get pdis qwen3-14b -o yaml
 # 期望输出中包含：
 # status:
 #   phase: Running
-#   endpoint: <router-service-ip>:8000
 #   roleStatuses:
 #   - name: router
 #     ready: 1
@@ -418,15 +495,11 @@ kubectl get pdis qwen3-14b -o yaml
 #     ready: 1
 #     total: 1
 
-# 方式二：REST API（通过 port-forward 访问 pd-manager，a30 无 LoadBalancer）
-PD_POD=$(kubectl get pod -n pd-manager-system -l control-plane=controller-manager -o jsonpath='{.items[0].metadata.name}')
-kubectl port-forward -n pd-manager-system pod/${PD_POD} 8080:8080 &
-sleep 2
-
-curl http://localhost:8080/api/v1/pd-inference-services/qwen3-14b
+# 方式二：REST API（通过 port-forward 访问 pd-manager，前置：已设置 18010 port-forward）
+curl http://localhost:18010/api/v1/pd-inference-services/qwen3-14b
 
 # 方式三：列表查询
-curl http://localhost:8080/api/v1/pd-inference-services
+curl http://localhost:18010/api/v1/pd-inference-services
 ```
 
 **预期结果**：
@@ -442,7 +515,7 @@ curl http://localhost:8080/api/v1/pd-inference-services
 
 ```bash
 # REST API 方式（推荐；先 port-forward 见 US-02）
-curl -X PUT http://localhost:8080/api/v1/pd-inference-services/qwen3-14b \
+curl -X PUT http://localhost:18010/api/v1/pd-inference-services/qwen3-14b \
   -H 'Content-Type: application/json' \
   -d '{"spec":{"decode":{"replicas":2}}}'
 
@@ -459,7 +532,7 @@ kubectl wait pdis qwen3-14b --for=jsonpath='.status.roleStatuses[?(@.name=="deco
 **不可变字段测试（期望被拒绝）**：
 ```bash
 # 尝试修改 model（不可变字段）→ 应返回 400
-curl -X PUT http://localhost:8080/api/v1/pd-inference-services/qwen3-14b \
+curl -X PUT http://localhost:18010/api/v1/pd-inference-services/qwen3-14b \
   -H 'Content-Type: application/json' \
   -d '{"spec":{"model":"new-model"}}'
 # 期望：400 Bad Request，错误信息含 "immutable"

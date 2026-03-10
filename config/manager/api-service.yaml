@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: controller-manager-api
+  namespace: system
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: pd-manager
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    control-plane: controller-manager
+    app.kubernetes.io/name: pd-manager
+  ports:
+    - name: rest-api
+      port: 8080
+      targetPort: 8080
+      protocol: TCP

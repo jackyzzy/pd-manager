@@ -103,7 +103,7 @@ spec:
     - --model-path
     - /models
     - --policy
-    - round-robin
+    - round_robin
     readinessProbe:
       httpPath: /health
       port: 8000
@@ -121,6 +121,7 @@ spec:
     volumeMounts:
     - {name: model-storage, mountPath: /models}
     - {name: dshm, mountPath: /dev/shm}
+    command: [python3, -m, sglang.launch_server]
     args:
     - --model-path
     - /models
@@ -152,6 +153,7 @@ spec:
     volumeMounts:
     - {name: model-storage, mountPath: /models}
     - {name: dshm, mountPath: /dev/shm}
+    command: [python3, -m, sglang.launch_server]
     args:
     - --model-path
     - /models

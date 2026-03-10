@@ -67,12 +67,14 @@ func main() {
 	var webhookCertPath, webhookCertName, webhookCertKey string
 	var enableLeaderElection bool
 	var probeAddr string
+	var apiAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.StringVar(&apiAddr, "api-bind-address", ":8080", "The address the REST API endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -219,7 +221,7 @@ func main() {
 	}
 
 	// Register the REST API server as a manager Runnable.
-	apiSrv := apiserver.New(":8080", mgr.GetClient(), mgr.GetScheme())
+	apiSrv := apiserver.New(apiAddr, mgr.GetClient(), mgr.GetScheme())
 	if err := mgr.Add(apiSrv); err != nil {
 		setupLog.Error(err, "unable to add API server to manager")
 		os.Exit(1)
