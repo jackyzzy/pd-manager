@@ -243,9 +243,46 @@ curl -X PUT http://localhost:18010/api/v1/pd-inference-services/qwen3-14b \
 
 ---
 
-## PDEngineProfile 模板
+## PDEngineProfile 配置模板
 
-通过 `engineProfileRef` 引用同命名空间的 PDEngineProfile，可为缺失的 `image` 和 `args` 字段提供默认值。
+### 概念说明
+
+PDEngineProfile 是**推理引擎配置模板**，用于固化特定硬件 + 模型组合下已优化的启动参数（镜像版本、engine args），
+供平台团队统一维护、业务用户快速复用。
+
+> **注意**：PDEngineProfile 与 `engineRuntimes`（patio sidecar）是正交的两个概念：
+> - **PDEngineProfile**：存放推理引擎的启动参数和镜像（`roleArgs`、`images`），是面向用户的配置复用机制
+> - **engineRuntimes（patio）**：基础设施层的 sidecar，负责将 prefill/decode worker 动态注册到 router，与 engine 参数无关；可以内联在 PDIS 中，也可以放在 Profile 的 `engineRuntimes` 字段中统一管理
+
+### PDEngineProfile REST API
+
+基础路径：`http://localhost:18010`（pd-manager port-forward 后）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/v1/pd-engine-profiles` | 列出所有配置模板 |
+| `POST` | `/api/v1/pd-engine-profiles` | 创建配置模板 |
+| `GET` | `/api/v1/pd-engine-profiles/{name}` | 查询单个模板 |
+| `PUT` | `/api/v1/pd-engine-profiles/{name}` | 更新模板（全量替换 spec，所有字段可变） |
+| `DELETE` | `/api/v1/pd-engine-profiles/{name}` | 删除模板（幂等） |
+
+> **注意**：REST API 固定操作 `default` namespace。
+
+### PDEngineProfile 字段参考
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `spec.description` | string | 人可读描述，说明该模板适用的硬件/模型场景 |
+| `spec.applicability` | ApplicabilitySpec | 适用条件（GPU 类型、内存要求等），仅作参考，pd-manager 不自动匹配 |
+| `spec.images` | RoleImages | 三角色容器镜像（`router`、`prefill`、`decode`）；PDIS 内联 image 为空时使用模板值 |
+| `spec.roleArgs` | RoleArgs | 三角色启动参数（`router`、`prefill`、`decode`）；PDIS 内联 args 为空时使用模板值 |
+| `spec.engineRuntimes` | RoleEngineRuntimes | patio sidecar 配置（`prefill`、`decode`）；PDIS 内联 engineRuntimes 为空时使用模板值 |
+
+**覆盖优先级**：PDIS 内联字段（非空）完全覆盖 Profile 默认值，不进行合并拼接。
+
+### 配置模板内容（A30 GPU Qwen3-14B 场景）
+
+通过 `engineProfileRef` 引用同命名空间的 PDEngineProfile，可为缺失的 `image`、`args` 和 `engineRuntimes` 字段提供默认值。
 
 **优先级**：CR 内联字段（非空）> Profile 默认值（不拼接，CR 非空时完全覆盖）。
 
@@ -253,15 +290,18 @@ curl -X PUT http://localhost:18010/api/v1/pd-inference-services/qwen3-14b \
 apiVersion: pdai.pdai.io/v1alpha1
 kind: PDEngineProfile
 metadata:
-  name: a30-qwen3-14b
+  name: sglang-a30-qwen3-14b
   namespace: default
 spec:
+  description: "SGLang PD disaggregated inference on A30 GPU (2-GPU TP) for Qwen3-14B"
   images:
     router: lmsysorg/sgl-model-gateway:v0.3.1
     prefill: lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
     decode:  lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
   roleArgs:
     router:
+    - --log-level
+    - info
     - --pd-disaggregation
     - --host
     - 0.0.0.0
@@ -271,9 +311,15 @@ spec:
     - /models
     - --policy
     - random
+    - --prometheus-host
+    - 0.0.0.0
+    - --prometheus-port
+    - "9090"
     prefill:
     - --model-path
     - /models
+    - --trust-remote-code
+    - --disable-radix-cache
     - --tp-size
     - "2"
     - --host
@@ -284,9 +330,19 @@ spec:
     - prefill
     - --disaggregation-transfer-backend
     - nixl
+    - --mem-fraction-static
+    - "0.88"
+    - --chunked-prefill-size
+    - "8192"
+    - --page-size
+    - "128"
+    - --cuda-graph-max-bs
+    - "256"
     decode:
     - --model-path
     - /models
+    - --trust-remote-code
+    - --disable-radix-cache
     - --tp-size
     - "2"
     - --host
@@ -297,4 +353,214 @@ spec:
     - decode
     - --disaggregation-transfer-backend
     - nixl
+    - --mem-fraction-static
+    - "0.88"
+    - --chunked-prefill-size
+    - "8192"
+    - --page-size
+    - "128"
+    - --cuda-graph-max-bs
+    - "256"
+  engineRuntimes:
+    prefill:
+    - profileName: sglang-pd-runtime
+      containers:
+      - name: patio-runtime
+        args:
+        - '--instance-info={"data":{"port":8000,"worker_type":"prefill","bootstrap_port":8998},"topo_type":"sglang"}'
+        env:
+        - name: SGL_ROUTER_PORT
+          value: "8000"
+        - name: ROLE_NAME
+          value: prefill
+    decode:
+    - profileName: sglang-pd-runtime
+      containers:
+      - name: patio-runtime
+        args:
+        - '--instance-info={"data":{"port":8000,"worker_type":"decode"},"topo_type":"sglang"}'
+        env:
+        - name: SGL_ROUTER_PORT
+          value: "8000"
+        - name: ROLE_NAME
+          value: decode
 ```
+
+### 使用配置模板创建推理服务（kubectl）
+
+引用模板的 PDIS 只需提供硬件相关字段（replicas、gpu、gpuType、resources、volumeMounts、command、probes），镜像、args、engineRuntimes 全部由模板提供：
+
+```yaml
+apiVersion: pdai.pdai.io/v1alpha1
+kind: PDInferenceService
+metadata:
+  name: qwen3-14b
+  namespace: default
+spec:
+  model: Qwen/Qwen3-14B
+  engineProfileRef: sglang-a30-qwen3-14b   # 引用上面的配置模板
+
+  volumes:
+  - name: model-storage
+    hostPath:
+      path: /data/model/qwen3-14b
+      type: Directory
+  - name: dshm
+    emptyDir:
+      medium: Memory
+      sizeLimit: 20Gi
+
+  router:
+    replicas: 1
+    resources:
+      requests:
+        memory: 4Gi
+        cpu: "4"
+      limits:
+        memory: 4Gi
+        cpu: "4"
+    volumeMounts:
+    - name: model-storage
+      mountPath: /models
+    readinessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+    livenessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 120
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 3
+
+  prefill:
+    replicas: 1
+    gpu: "2"
+    gpuType: a30
+    resources:
+      requests:
+        memory: 96Gi
+        cpu: "16"
+      limits:
+        memory: 128Gi
+        cpu: "32"
+    volumeMounts:
+    - name: model-storage
+      mountPath: /models
+    - name: dshm
+      mountPath: /dev/shm
+    command:
+    - python3
+    - -m
+    - sglang.launch_server
+    readinessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 10
+    livenessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 300
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 3
+
+  decode:
+    replicas: 1
+    gpu: "2"
+    gpuType: a30
+    resources:
+      requests:
+        memory: 96Gi
+        cpu: "16"
+      limits:
+        memory: 128Gi
+        cpu: "32"
+    volumeMounts:
+    - name: model-storage
+      mountPath: /models
+    - name: dshm
+      mountPath: /dev/shm
+    command:
+    - python3
+    - -m
+    - sglang.launch_server
+    readinessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 10
+    livenessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 480
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 3
+```
+
+### 使用配置模板创建推理服务（REST API）
+
+```bash
+curl -X POST http://localhost:18010/api/v1/pd-inference-services \
+  -H "Content-Type: application/json" \
+  -d @- << 'EOF'
+{
+  "apiVersion": "pdai.pdai.io/v1alpha1",
+  "kind": "PDInferenceService",
+  "metadata": {"name": "qwen3-14b", "namespace": "default"},
+  "spec": {
+    "model": "Qwen/Qwen3-14B",
+    "engineProfileRef": "sglang-a30-qwen3-14b",
+    "volumes": [
+      {"name": "model-storage", "hostPath": {"path": "/data/model/qwen3-14b", "type": "Directory"}},
+      {"name": "dshm", "emptyDir": {"medium": "Memory", "sizeLimit": "20Gi"}}
+    ],
+    "router": {
+      "replicas": 1,
+      "resources": {"requests": {"memory": "4Gi", "cpu": "4"}, "limits": {"memory": "4Gi", "cpu": "4"}},
+      "volumeMounts": [{"name": "model-storage", "mountPath": "/models"}],
+      "readinessProbe": {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 30,
+                         "periodSeconds": 10, "timeoutSeconds": 5, "failureThreshold": 3},
+      "livenessProbe":  {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 120,
+                         "periodSeconds": 30, "timeoutSeconds": 5, "failureThreshold": 3}
+    },
+    "prefill": {
+      "replicas": 1,
+      "gpu": "2",
+      "gpuType": "a30",
+      "resources": {"requests": {"memory": "96Gi", "cpu": "16"}, "limits": {"memory": "128Gi", "cpu": "32"}},
+      "volumeMounts": [{"name": "model-storage", "mountPath": "/models"}, {"name": "dshm", "mountPath": "/dev/shm"}],
+      "command": ["python3", "-m", "sglang.launch_server"],
+      "readinessProbe": {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 30,
+                         "periodSeconds": 10, "timeoutSeconds": 5, "failureThreshold": 10},
+      "livenessProbe":  {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 300,
+                         "periodSeconds": 30, "timeoutSeconds": 5, "failureThreshold": 3}
+    },
+    "decode": {
+      "replicas": 1,
+      "gpu": "2",
+      "gpuType": "a30",
+      "resources": {"requests": {"memory": "96Gi", "cpu": "16"}, "limits": {"memory": "128Gi", "cpu": "32"}},
+      "volumeMounts": [{"name": "model-storage", "mountPath": "/models"}, {"name": "dshm", "mountPath": "/dev/shm"}],
+      "command": ["python3", "-m", "sglang.launch_server"],
+      "readinessProbe": {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 30,
+                         "periodSeconds": 10, "timeoutSeconds": 5, "failureThreshold": 10},
+      "livenessProbe":  {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 480,
+                         "periodSeconds": 30, "timeoutSeconds": 5, "failureThreshold": 3}
+    }
+  }
+}
+EOF
+```
+
+与直接内联配置相比，引用配置模板后 PDIS 的 JSON body 减少了约 60% 的内容（无需填写 image、args、engineRuntimes）。

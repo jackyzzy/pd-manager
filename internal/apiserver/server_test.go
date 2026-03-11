@@ -78,8 +78,10 @@ func TestServer_Routes(t *testing.T) {
 		path   string
 	}{
 		{http.MethodGet, "/api/v1/pd-inference-services"},
+		{http.MethodGet, "/api/v1/pd-engine-profiles"},
 		{http.MethodGet, "/healthz"},
 		{http.MethodDelete, "/api/v1/pd-inference-services/notexist"},
+		{http.MethodDelete, "/api/v1/pd-engine-profiles/notexist"},
 	}
 	for _, rt := range definite {
 		req, _ := http.NewRequest(rt.method, base+rt.path, nil)
@@ -102,6 +104,8 @@ func TestServer_Routes(t *testing.T) {
 	}{
 		{http.MethodGet, "/api/v1/pd-inference-services/test"},
 		{http.MethodPut, "/api/v1/pd-inference-services/test"},
+		{http.MethodGet, "/api/v1/pd-engine-profiles/test"},
+		{http.MethodPut, "/api/v1/pd-engine-profiles/test"},
 	}
 	for _, rt := range resource {
 		req, _ := http.NewRequest(rt.method, base+rt.path, nil)

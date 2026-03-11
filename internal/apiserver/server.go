@@ -43,6 +43,13 @@ func New(addr string, cl client.Client, scheme *runtime.Scheme) *Server {
 	mux.HandleFunc("GET /api/v1/pd-inference-services/{name}", h.Get)
 	mux.HandleFunc("PUT /api/v1/pd-inference-services/{name}", h.Update)
 	mux.HandleFunc("DELETE /api/v1/pd-inference-services/{name}", h.Delete)
+
+	mux.HandleFunc("GET /api/v1/pd-engine-profiles", h.ListProfiles)
+	mux.HandleFunc("POST /api/v1/pd-engine-profiles", h.CreateProfile)
+	mux.HandleFunc("GET /api/v1/pd-engine-profiles/{name}", h.GetProfile)
+	mux.HandleFunc("PUT /api/v1/pd-engine-profiles/{name}", h.UpdateProfile)
+	mux.HandleFunc("DELETE /api/v1/pd-engine-profiles/{name}", h.DeleteProfile)
+
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})

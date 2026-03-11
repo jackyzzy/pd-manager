@@ -41,9 +41,16 @@ func NewRBGBuilder() *RBGBuilder {
 //   - POD_IP injected via Downward API on prefill/decode
 //   - ownerReference pointing back to the PDInferenceService
 func (b *RBGBuilder) Build(pdis *v1alpha1.PDInferenceService, cfg *config.MergedConfig) (*rbgv1alpha1.RoleBasedGroup, error) {
+	// Resolve per-role engine runtimes from profile (fallback when inline is empty).
+	var profilePrefill, profileDecode []v1alpha1.EngineRuntime
+	if cfg.EngineRuntimes != nil {
+		profilePrefill = cfg.EngineRuntimes.Prefill
+		profileDecode = cfg.EngineRuntimes.Decode
+	}
+
 	routerRole := b.buildRouterRole(pdis, cfg)
-	prefillRole := b.buildInferenceRole("prefill", pdis, &pdis.Spec.Prefill, cfg.Images.Prefill, cfg.PrefillArgs, resolveEngineRuntimes(pdis.Spec.Prefill.EngineRuntimes, cfg))
-	decodeRole := b.buildInferenceRole("decode", pdis, &pdis.Spec.Decode, cfg.Images.Decode, cfg.DecodeArgs, resolveEngineRuntimes(pdis.Spec.Decode.EngineRuntimes, cfg))
+	prefillRole := b.buildInferenceRole("prefill", pdis, &pdis.Spec.Prefill, cfg.Images.Prefill, cfg.PrefillArgs, resolveEngineRuntimes(pdis.Spec.Prefill.EngineRuntimes, profilePrefill))
+	decodeRole := b.buildInferenceRole("decode", pdis, &pdis.Spec.Decode, cfg.Images.Decode, cfg.DecodeArgs, resolveEngineRuntimes(pdis.Spec.Decode.EngineRuntimes, profileDecode))
 
 	rbg := &rbgv1alpha1.RoleBasedGroup{
 		ObjectMeta: metav1.ObjectMeta{
@@ -311,9 +318,12 @@ func convertEngineRuntimes(runtimes []v1alpha1.EngineRuntime) []rbgv1alpha1.Engi
 
 // resolveEngineRuntimes returns the inline role runtimes if non-empty,
 // otherwise falls back to the profile runtimes for that role.
-func resolveEngineRuntimes(inline []v1alpha1.EngineRuntime, cfg *config.MergedConfig) []rbgv1alpha1.EngineRuntime {
+func resolveEngineRuntimes(inline []v1alpha1.EngineRuntime, profileRuntimes []v1alpha1.EngineRuntime) []rbgv1alpha1.EngineRuntime {
 	if len(inline) > 0 {
 		return convertEngineRuntimes(inline)
+	}
+	if len(profileRuntimes) > 0 {
+		return convertEngineRuntimes(profileRuntimes)
 	}
 	return nil
 }

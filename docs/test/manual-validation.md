@@ -680,15 +680,567 @@ kubectl delete pdis qwen3-14b
 
 ---
 
+## US-06：配置模板（PDEngineProfile）CRUD
+
+PDEngineProfile 是**推理引擎配置模板**，固化特定硬件 + 模型组合下已优化的镜像和启动参数，供业务用户通过 `engineProfileRef` 快速复用。
+
+> **概念区分**：
+> - **PDEngineProfile**：存放推理引擎镜像和 args 参数（`roleArgs`、`images`），是面向用户的配置复用机制
+> - **engineRuntimes（patio）**：基础设施 sidecar，负责将 prefill/decode worker 动态注册到 router；可以内联在 PDIS 中，也可以放入 Profile 的 `engineRuntimes` 字段统一管理
+
+### 6.1 kubectl 操作 PDEngineProfile
+
+```bash
+# 创建模板文件
+cat > /tmp/profile.yaml << 'EOF'
+apiVersion: pdai.pdai.io/v1alpha1
+kind: PDEngineProfile
+metadata:
+  name: sglang-a30-qwen3-14b
+  namespace: default
+spec:
+  description: "SGLang PD disaggregated inference on A30 GPU (2-GPU TP) for Qwen3-14B"
+  images:
+    router: lmsysorg/sgl-model-gateway:v0.3.1
+    prefill: lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
+    decode:  lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
+  roleArgs:
+    router:
+    - --log-level
+    - info
+    - --pd-disaggregation
+    - --host
+    - 0.0.0.0
+    - --port
+    - "8000"
+    - --model-path
+    - /models
+    - --policy
+    - random
+    - --prometheus-host
+    - 0.0.0.0
+    - --prometheus-port
+    - "9090"
+    prefill:
+    - --model-path
+    - /models
+    - --trust-remote-code
+    - --disable-radix-cache
+    - --tp-size
+    - "2"
+    - --host
+    - $(POD_IP)
+    - --port
+    - "8000"
+    - --disaggregation-mode
+    - prefill
+    - --disaggregation-transfer-backend
+    - nixl
+    - --mem-fraction-static
+    - "0.88"
+    - --chunked-prefill-size
+    - "8192"
+    - --page-size
+    - "128"
+    - --cuda-graph-max-bs
+    - "256"
+    decode:
+    - --model-path
+    - /models
+    - --trust-remote-code
+    - --disable-radix-cache
+    - --tp-size
+    - "2"
+    - --host
+    - $(POD_IP)
+    - --port
+    - "8000"
+    - --disaggregation-mode
+    - decode
+    - --disaggregation-transfer-backend
+    - nixl
+    - --mem-fraction-static
+    - "0.88"
+    - --chunked-prefill-size
+    - "8192"
+    - --page-size
+    - "128"
+    - --cuda-graph-max-bs
+    - "256"
+  engineRuntimes:
+    prefill:
+    - profileName: sglang-pd-runtime
+      containers:
+      - name: patio-runtime
+        args:
+        - '--instance-info={"data":{"port":8000,"worker_type":"prefill","bootstrap_port":8998},"topo_type":"sglang"}'
+        env:
+        - name: SGL_ROUTER_PORT
+          value: "8000"
+        - name: ROLE_NAME
+          value: prefill
+    decode:
+    - profileName: sglang-pd-runtime
+      containers:
+      - name: patio-runtime
+        args:
+        - '--instance-info={"data":{"port":8000,"worker_type":"decode"},"topo_type":"sglang"}'
+        env:
+        - name: SGL_ROUTER_PORT
+          value: "8000"
+        - name: ROLE_NAME
+          value: decode
+EOF
+
+# 创建模板
+kubectl apply -f /tmp/profile.yaml
+# 期望：pdengineprofile.pdai.pdai.io/sglang-a30-qwen3-14b created
+
+# 查询模板列表
+kubectl get pdengineprofile -n default
+# 期望：NAME                    AGE
+#       sglang-a30-qwen3-14b   ...
+
+# 查询具体模板内容
+kubectl get pdengineprofile sglang-a30-qwen3-14b -n default -o yaml | head -30
+
+# 修改模板（更换 router 策略）
+kubectl patch pdengineprofile sglang-a30-qwen3-14b -n default --type=json \
+  -p='[{"op":"replace","path":"/spec/roleArgs/router/13","value":"round_robin"}]'
+# 期望：pdengineprofile.pdai.pdai.io/sglang-a30-qwen3-14b patched
+
+# 验证修改
+kubectl get pdengineprofile sglang-a30-qwen3-14b -n default -o jsonpath='{.spec.roleArgs.router}'
+```
+
+### 6.2 REST API 操作 PDEngineProfile
+
+```bash
+# 设置 pd-manager REST API 访问
+PD_POD=$(kubectl get pod -n pd-manager-system -l control-plane=controller-manager -o jsonpath='{.items[0].metadata.name}')
+kubectl port-forward -n pd-manager-system pod/${PD_POD} --address=0.0.0.0 18010:8080 &
+
+# 列出所有模板（初始为空）
+curl http://localhost:18010/api/v1/pd-engine-profiles | jq '.items | length'
+# 期望：0
+
+# POST 创建模板
+curl -X POST http://localhost:18010/api/v1/pd-engine-profiles \
+  -H "Content-Type: application/json" \
+  -d @- << 'EOF'
+{
+  "apiVersion": "pdai.pdai.io/v1alpha1",
+  "kind": "PDEngineProfile",
+  "metadata": {"name": "sglang-a30-qwen3-14b", "namespace": "default"},
+  "spec": {
+    "description": "SGLang PD disaggregated inference on A30 GPU (2-GPU TP) for Qwen3-14B",
+    "images": {
+      "router": "lmsysorg/sgl-model-gateway:v0.3.1",
+      "prefill": "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime",
+      "decode":  "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime"
+    },
+    "roleArgs": {
+      "router": ["--log-level","info","--pd-disaggregation","--host","0.0.0.0","--port","8000",
+                 "--model-path","/models","--policy","random",
+                 "--prometheus-host","0.0.0.0","--prometheus-port","9090"],
+      "prefill": ["--model-path","/models","--trust-remote-code","--disable-radix-cache",
+                  "--tp-size","2","--host","$(POD_IP)","--port","8000",
+                  "--disaggregation-mode","prefill","--disaggregation-transfer-backend","nixl",
+                  "--mem-fraction-static","0.88","--chunked-prefill-size","8192",
+                  "--page-size","128","--cuda-graph-max-bs","256"],
+      "decode":  ["--model-path","/models","--trust-remote-code","--disable-radix-cache",
+                  "--tp-size","2","--host","$(POD_IP)","--port","8000",
+                  "--disaggregation-mode","decode","--disaggregation-transfer-backend","nixl",
+                  "--mem-fraction-static","0.88","--chunked-prefill-size","8192",
+                  "--page-size","128","--cuda-graph-max-bs","256"]
+    },
+    "engineRuntimes": {
+      "prefill": [{"profileName": "sglang-pd-runtime", "containers": [{"name": "patio-runtime",
+        "args": ["--instance-info={\"data\":{\"port\":8000,\"worker_type\":\"prefill\",\"bootstrap_port\":8998},\"topo_type\":\"sglang\"}"],
+        "env": [{"name": "SGL_ROUTER_PORT", "value": "8000"}, {"name": "ROLE_NAME", "value": "prefill"}]}]}],
+      "decode":  [{"profileName": "sglang-pd-runtime", "containers": [{"name": "patio-runtime",
+        "args": ["--instance-info={\"data\":{\"port\":8000,\"worker_type\":\"decode\"},\"topo_type\":\"sglang\"}"],
+        "env": [{"name": "SGL_ROUTER_PORT", "value": "8000"}, {"name": "ROLE_NAME", "value": "decode"}]}]}]
+    }
+  }
+}
+EOF
+# 期望：HTTP 201，返回创建的 PDEngineProfile 对象
+
+# GET 查询单个模板
+curl http://localhost:18010/api/v1/pd-engine-profiles/sglang-a30-qwen3-14b | jq '.spec.description'
+# 期望："SGLang PD disaggregated inference on A30 GPU (2-GPU TP) for Qwen3-14B"
+
+# GET 列表确认存在
+curl http://localhost:18010/api/v1/pd-engine-profiles | jq '.items | length'
+# 期望：1
+
+# PUT 更新模板（修改 router 策略为 round_robin）
+curl -X PUT http://localhost:18010/api/v1/pd-engine-profiles/sglang-a30-qwen3-14b \
+  -H "Content-Type: application/json" \
+  -d @- << 'EOF'
+{
+  "apiVersion": "pdai.pdai.io/v1alpha1",
+  "kind": "PDEngineProfile",
+  "metadata": {"name": "sglang-a30-qwen3-14b", "namespace": "default"},
+  "spec": {
+    "description": "SGLang PD disaggregated inference on A30 GPU (2-GPU TP) for Qwen3-14B",
+    "images": {
+      "router": "lmsysorg/sgl-model-gateway:v0.3.1",
+      "prefill": "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime",
+      "decode":  "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime"
+    },
+    "roleArgs": {
+      "router": ["--log-level","info","--pd-disaggregation","--host","0.0.0.0","--port","8000",
+                 "--model-path","/models","--policy","round_robin",
+                 "--prometheus-host","0.0.0.0","--prometheus-port","9090"],
+      "prefill": ["--model-path","/models","--trust-remote-code","--disable-radix-cache",
+                  "--tp-size","2","--host","$(POD_IP)","--port","8000",
+                  "--disaggregation-mode","prefill","--disaggregation-transfer-backend","nixl",
+                  "--mem-fraction-static","0.88","--chunked-prefill-size","8192",
+                  "--page-size","128","--cuda-graph-max-bs","256"],
+      "decode":  ["--model-path","/models","--trust-remote-code","--disable-radix-cache",
+                  "--tp-size","2","--host","$(POD_IP)","--port","8000",
+                  "--disaggregation-mode","decode","--disaggregation-transfer-backend","nixl",
+                  "--mem-fraction-static","0.88","--chunked-prefill-size","8192",
+                  "--page-size","128","--cuda-graph-max-bs","256"]
+    }
+  }
+}
+EOF
+# 期望：HTTP 200，返回更新后的对象
+
+# GET 确认 policy 已变为 round_robin
+curl http://localhost:18010/api/v1/pd-engine-profiles/sglang-a30-qwen3-14b | jq '.spec.roleArgs.router'
+
+# DELETE 删除模板
+curl -X DELETE http://localhost:18010/api/v1/pd-engine-profiles/sglang-a30-qwen3-14b
+# 期望：HTTP 200
+
+# 再次 DELETE（幂等）
+curl -X DELETE http://localhost:18010/api/v1/pd-engine-profiles/sglang-a30-qwen3-14b
+# 期望：HTTP 200（不报 404）
+
+# GET 确认已删除
+curl http://localhost:18010/api/v1/pd-engine-profiles/sglang-a30-qwen3-14b
+# 期望：HTTP 404
+
+# 重新创建（恢复模板，为 US-07 使用）
+# 恢复 engineRuntimes（PUT 时把 engineRuntimes 恢复回去，或重新 POST）
+curl -X POST http://localhost:18010/api/v1/pd-engine-profiles \
+  -H "Content-Type: application/json" \
+  -d @- << 'EOF'
+{
+  "apiVersion": "pdai.pdai.io/v1alpha1",
+  "kind": "PDEngineProfile",
+  "metadata": {"name": "sglang-a30-qwen3-14b", "namespace": "default"},
+  "spec": {
+    "description": "SGLang PD disaggregated inference on A30 GPU (2-GPU TP) for Qwen3-14B",
+    "images": {
+      "router": "lmsysorg/sgl-model-gateway:v0.3.1",
+      "prefill": "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime",
+      "decode":  "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime"
+    },
+    "roleArgs": {
+      "router": ["--log-level","info","--pd-disaggregation","--host","0.0.0.0","--port","8000",
+                 "--model-path","/models","--policy","random",
+                 "--prometheus-host","0.0.0.0","--prometheus-port","9090"],
+      "prefill": ["--model-path","/models","--trust-remote-code","--disable-radix-cache",
+                  "--tp-size","2","--host","$(POD_IP)","--port","8000",
+                  "--disaggregation-mode","prefill","--disaggregation-transfer-backend","nixl",
+                  "--mem-fraction-static","0.88","--chunked-prefill-size","8192",
+                  "--page-size","128","--cuda-graph-max-bs","256"],
+      "decode":  ["--model-path","/models","--trust-remote-code","--disable-radix-cache",
+                  "--tp-size","2","--host","$(POD_IP)","--port","8000",
+                  "--disaggregation-mode","decode","--disaggregation-transfer-backend","nixl",
+                  "--mem-fraction-static","0.88","--chunked-prefill-size","8192",
+                  "--page-size","128","--cuda-graph-max-bs","256"]
+    },
+    "engineRuntimes": {
+      "prefill": [{"profileName": "sglang-pd-runtime", "containers": [{"name": "patio-runtime",
+        "args": ["--instance-info={\"data\":{\"port\":8000,\"worker_type\":\"prefill\",\"bootstrap_port\":8998},\"topo_type\":\"sglang\"}"],
+        "env": [{"name": "SGL_ROUTER_PORT", "value": "8000"}, {"name": "ROLE_NAME", "value": "prefill"}]}]}],
+      "decode":  [{"profileName": "sglang-pd-runtime", "containers": [{"name": "patio-runtime",
+        "args": ["--instance-info={\"data\":{\"port\":8000,\"worker_type\":\"decode\"},\"topo_type\":\"sglang\"}"],
+        "env": [{"name": "SGL_ROUTER_PORT", "value": "8000"}, {"name": "ROLE_NAME", "value": "decode"}]}]}]
+    }
+  }
+}
+EOF
+# 期望：HTTP 201
+```
+
+---
+
+## US-07：使用配置模板创建 PD 推理服务
+
+**目标**：验证通过 `engineProfileRef` 引用模板创建推理服务，最终效果与 US-01（直接内联配置）完全一致：
+三个角色就绪，patio sidecar 成功注册，推理接口正常返回。
+
+> **前置条件**：`sglang-a30-qwen3-14b` PDEngineProfile 已存在（US-06 已完成创建）
+
+### 7.1 kubectl 使用模板创建推理服务
+
+```bash
+# 创建使用模板的简化 PDIS（只填硬件参数，镜像/args/engineRuntimes 全由模板提供）
+cat > /tmp/pdis-with-profile.yaml << 'EOF'
+apiVersion: pdai.pdai.io/v1alpha1
+kind: PDInferenceService
+metadata:
+  name: qwen3-14b-profile
+  namespace: default
+spec:
+  model: Qwen/Qwen3-14B
+  engineProfileRef: sglang-a30-qwen3-14b   # 引用配置模板
+
+  volumes:
+  - name: model-storage
+    hostPath:
+      path: /data/model/qwen3-14b
+      type: Directory
+  - name: dshm
+    emptyDir:
+      medium: Memory
+      sizeLimit: 20Gi
+
+  router:
+    replicas: 1
+    resources:
+      requests:
+        memory: 4Gi
+        cpu: "4"
+      limits:
+        memory: 4Gi
+        cpu: "4"
+    volumeMounts:
+    - name: model-storage
+      mountPath: /models
+    readinessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+    livenessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 120
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 3
+
+  prefill:
+    replicas: 1
+    gpu: "2"
+    gpuType: a30
+    resources:
+      requests:
+        memory: 96Gi
+        cpu: "16"
+      limits:
+        memory: 128Gi
+        cpu: "32"
+    volumeMounts:
+    - name: model-storage
+      mountPath: /models
+    - name: dshm
+      mountPath: /dev/shm
+    command:
+    - python3
+    - -m
+    - sglang.launch_server
+    readinessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 10
+    livenessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 300
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 3
+
+  decode:
+    replicas: 1
+    gpu: "2"
+    gpuType: a30
+    resources:
+      requests:
+        memory: 96Gi
+        cpu: "16"
+      limits:
+        memory: 128Gi
+        cpu: "32"
+    volumeMounts:
+    - name: model-storage
+      mountPath: /models
+    - name: dshm
+      mountPath: /dev/shm
+    command:
+    - python3
+    - -m
+    - sglang.launch_server
+    readinessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 10
+    livenessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 480
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 3
+EOF
+
+kubectl apply -f /tmp/pdis-with-profile.yaml
+# 期望：pdinferenceservice.pdai.pdai.io/qwen3-14b-profile created
+
+# 等待所有 Pod 就绪（约 5~10 分钟，sglang 需要加载模型）
+kubectl wait pod -l rolebasedgroup.workloads.x-k8s.io/role=router \
+  -n default --for=condition=Ready --timeout=600s
+
+# 确认三个角色 Pod 均 Running
+kubectl get pod -n default | grep qwen3-14b-profile
+# 期望：qwen3-14b-profile-router-0    2/1 Running（含 patio sidecar）
+#       qwen3-14b-profile-prefill-0   2/1 Running
+#       qwen3-14b-profile-decode-0    2/1 Running
+
+# 确认 PDIS Phase = Running
+kubectl get pdis qwen3-14b-profile -o jsonpath='{.status.phase}'
+# 期望：Running
+
+# 检查 RBG 是否创建（镜像/args 应与 US-01 内联配置一致）
+kubectl get rbg qwen3-14b-profile -o jsonpath='{.spec.roles[0].templateSource.template.spec.containers[0].image}'
+# 期望：lmsysorg/sgl-model-gateway:v0.3.1（来自模板）
+
+kubectl get rbg qwen3-14b-profile -o jsonpath='{.spec.roles[1].templateSource.template.spec.containers[0].args}' | jq .
+# 期望：prefill args 列表（来自模板 roleArgs.prefill）
+```
+
+### 7.2 验证 patio sidecar 注册（来自模板 engineRuntimes）
+
+```bash
+# 检查 prefill pod 是否有 patio-runtime 容器（来自模板 engineRuntimes.prefill）
+kubectl get pod qwen3-14b-profile-prefill-0 -o jsonpath='{.spec.containers[*].name}'
+# 期望包含：prefill patio-runtime
+
+# 检查 patio 注册日志
+kubectl logs qwen3-14b-profile-prefill-0 -c patio-runtime | grep -i "register\|success"
+kubectl logs qwen3-14b-profile-decode-0  -c patio-runtime | grep -i "register\|success"
+
+# port-forward router
+kubectl port-forward pod/qwen3-14b-profile-router-0 --address=0.0.0.0 18001:8000 &
+
+# 确认 router 已注册 worker
+curl http://localhost:18001/get_server_info | jq '{prefill: .prefill_servers, decode: .decode_servers}'
+# 期望：prefill 和 decode worker URL 各至少 1 条
+
+# 推理验证
+curl http://localhost:18001/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "/models",
+    "messages": [{"role": "user", "content": "Hello, what is 1+1?"}],
+    "max_tokens": 50,
+    "temperature": 0
+  }'
+# 期望：HTTP 200，choices[0].message.content 含有效回答（如 "2"）
+```
+
+### 7.3 REST API 使用模板创建推理服务
+
+```bash
+# 先删除 kubectl 创建的实例（如果存在）
+kubectl delete pdis qwen3-14b-profile --ignore-not-found
+
+# 通过 REST API POST 使用模板创建（body 比 US-01 精简约 60%）
+curl -X POST http://localhost:18010/api/v1/pd-inference-services \
+  -H "Content-Type: application/json" \
+  -d @- << 'EOF'
+{
+  "apiVersion": "pdai.pdai.io/v1alpha1",
+  "kind": "PDInferenceService",
+  "metadata": {"name": "qwen3-14b-profile", "namespace": "default"},
+  "spec": {
+    "model": "Qwen/Qwen3-14B",
+    "engineProfileRef": "sglang-a30-qwen3-14b",
+    "volumes": [
+      {"name": "model-storage", "hostPath": {"path": "/data/model/qwen3-14b", "type": "Directory"}},
+      {"name": "dshm", "emptyDir": {"medium": "Memory", "sizeLimit": "20Gi"}}
+    ],
+    "router": {
+      "replicas": 1,
+      "resources": {"requests": {"memory": "4Gi", "cpu": "4"}, "limits": {"memory": "4Gi", "cpu": "4"}},
+      "volumeMounts": [{"name": "model-storage", "mountPath": "/models"}],
+      "readinessProbe": {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 30,
+                         "periodSeconds": 10, "timeoutSeconds": 5, "failureThreshold": 3},
+      "livenessProbe":  {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 120,
+                         "periodSeconds": 30, "timeoutSeconds": 5, "failureThreshold": 3}
+    },
+    "prefill": {
+      "replicas": 1,
+      "gpu": "2",
+      "gpuType": "a30",
+      "resources": {"requests": {"memory": "96Gi", "cpu": "16"}, "limits": {"memory": "128Gi", "cpu": "32"}},
+      "volumeMounts": [{"name": "model-storage", "mountPath": "/models"}, {"name": "dshm", "mountPath": "/dev/shm"}],
+      "command": ["python3", "-m", "sglang.launch_server"],
+      "readinessProbe": {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 30,
+                         "periodSeconds": 10, "timeoutSeconds": 5, "failureThreshold": 10},
+      "livenessProbe":  {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 300,
+                         "periodSeconds": 30, "timeoutSeconds": 5, "failureThreshold": 3}
+    },
+    "decode": {
+      "replicas": 1,
+      "gpu": "2",
+      "gpuType": "a30",
+      "resources": {"requests": {"memory": "96Gi", "cpu": "16"}, "limits": {"memory": "128Gi", "cpu": "32"}},
+      "volumeMounts": [{"name": "model-storage", "mountPath": "/models"}, {"name": "dshm", "mountPath": "/dev/shm"}],
+      "command": ["python3", "-m", "sglang.launch_server"],
+      "readinessProbe": {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 30,
+                         "periodSeconds": 10, "timeoutSeconds": 5, "failureThreshold": 10},
+      "livenessProbe":  {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 480,
+                         "periodSeconds": 30, "timeoutSeconds": 5, "failureThreshold": 3}
+    }
+  }
+}
+EOF
+# 期望：HTTP 201，返回创建的 PDInferenceService 对象
+
+# 等待就绪后验证（同 7.1/7.2）
+kubectl get pdis qwen3-14b-profile -o jsonpath='{.status.phase}'
+# 期望：Running
+
+# 推理验证
+curl http://localhost:18001/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "/models", "messages": [{"role": "user", "content": "1+1=?"}], "max_tokens": 10}'
+# 期望：HTTP 200，有效回答
+
+# 清理
+kubectl delete pdis qwen3-14b-profile
+```
+
+---
+
 ## 清理
 
 ```bash
 # 清理所有测试资源
 kubectl delete pdis --all -n default
 kubectl delete pdis --all -n pd-manager-system
+kubectl delete pdengineprofile --all -n default
 
 # 验证清理完成
-kubectl get pdis,rbg --all-namespaces
+kubectl get pdis,rbg,pdengineprofile --all-namespaces
 ```
 
 ---
@@ -709,5 +1261,14 @@ kubectl get pdis,rbg --all-namespaces
 | US-05 | patio 日志显示注册成功 | ☐ |
 | US-05 | router get_server_info 包含 prefill/decode worker URL | ☐ |
 | US-05 | 推理接口返回正常回答 | ☐ |
+| US-06 | REST API POST 创建 PDEngineProfile，返回 201 | ☐ |
+| US-06 | REST API GET 查询 Profile，返回正确内容 | ☐ |
+| US-06 | REST API PUT 更新 Profile，策略字段变化 | ☐ |
+| US-06 | REST API DELETE 删除后 GET 返回 404，再次 DELETE 返回 200（幂等） | ☐ |
+| US-07 | kubectl 使用 engineProfileRef 创建 PDIS，Phase=Running | ☐ |
+| US-07 | prefill/decode Pod 含 patio-runtime sidecar（来自 Profile engineRuntimes） | ☐ |
+| US-07 | RBG roles 的 image/args 与内联版本一致（来自 Profile）| ☐ |
+| US-07 | REST API 使用 engineProfileRef 创建 PDIS，效果相同 | ☐ |
+| US-07 | router worker 注册正确，推理接口返回有效回答 | ☐ |
 | 异常 | 无效 Profile 引用 → Status.Phase = Failed | ☐ |
 | 异常 | 不可变字段修改被 Webhook 拒绝 | ☐ |

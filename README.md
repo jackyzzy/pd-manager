@@ -260,6 +260,8 @@ HPA ──writes──▶ RoleBasedGroupScalingAdapter.spec.replicas
 
 ## REST API
 
+### PDInferenceService
+
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/v1/pd-inference-services` | List all instances |
@@ -267,6 +269,16 @@ HPA ──writes──▶ RoleBasedGroupScalingAdapter.spec.replicas
 | `GET` | `/api/v1/pd-inference-services/{name}` | Query status |
 | `PUT` | `/api/v1/pd-inference-services/{name}` | Update (scale / config) |
 | `DELETE` | `/api/v1/pd-inference-services/{name}` | Delete instance |
+
+### PDEngineProfile (config template)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/pd-engine-profiles` | List all templates |
+| `POST` | `/api/v1/pd-engine-profiles` | Create template |
+| `GET` | `/api/v1/pd-engine-profiles/{name}` | Query template |
+| `PUT` | `/api/v1/pd-engine-profiles/{name}` | Update template (full spec replace, all fields mutable) |
+| `DELETE` | `/api/v1/pd-engine-profiles/{name}` | Delete template (idempotent) |
 
 See [`docs/api/pdis-spec.md`](docs/api/pdis-spec.md) for full REST API documentation with request/response examples.
 
