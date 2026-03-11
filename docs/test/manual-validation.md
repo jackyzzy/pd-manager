@@ -4,116 +4,242 @@
 
 | 项目 | 值 |
 |------|-----|
-| 开发环境 | 本地 WSL (`/home/zzy/code/pd-manager`) |
 | 测试环境 | a30（`ssh a30@183.56.181.9 -p 34451`，免密登录）|
-| a30 代码路径 | `/home/a30/rbg-deployment/pd-manager` |
-| RBG Operator | 已预装于 a30 |
-| GPU 节点 | 已标记 `accelerator=a30` |
+| a30 代码路径 | `/home/a30/rbg-deployment/` |
+| GPU 节点 | 需标记 `accelerator=a30` |
 | 模型路径 | `/data/model/qwen3-14b`（节点本地） |
 | pd-manager Namespace | `pd-manager-system` |
 
 ## 前置条件
 
-1. a30 环境已安装 RBG Operator（提供 `RoleBasedGroup` CRD）
-2. a30 上 `kubectl` 已配置指向本地集群
-3. pd-manager 已部署（见下方部署步骤；若已部署可直接跳到验收用例）
-4. `pd-manager-system` namespace 已创建
+本手册假设测试环境**仅有**：
+
+- 已安装的 Kubernetes 集群（单节点或多节点均可）
+- `kubectl` 已配置并能访问目标集群（`kubectl get nodes` 正常返回）
+- Docker（用于构建和导入镜像）
+
+以下所有组件均通过部署步骤从零安装。
 
 ## 部署步骤
 
-> **注意**：a30 无公网访问，使用 vendor 模式构建，通过 containerd 直接导入镜像（不走 Registry）。
+> **a30 环境说明**：a30 使用 containerd 作为容器运行时（k8s），与 Docker 相互隔离。
+> 因此镜像需先用 Docker 构建，再通过 `ctr` 导入到 containerd 的 `k8s.io` 命名空间。
+> 若目标集群使用 Docker 运行时，`docker build` 后无需额外导入步骤。
 
-### 1. 获取代码到 a30
+---
 
-**方式 A（推荐）：直接从 GitHub 克隆**
+### 步骤 0：标记 GPU 节点
+
+pd-manager 通过 `gpuType` 字段将工作负载调度到对应 GPU 节点，需为节点添加标签：
 
 ```bash
-# 在 a30 上
+# 查看节点列表
+kubectl get nodes
+
+# 为 GPU 节点打标签（将 <node-name> 替换为实际节点名）
+kubectl label node <node-name> accelerator=a30
+
+# 验证
+kubectl get node --show-labels | grep accelerator
+```
+
+---
+
+### 步骤 1：安装 RBG Operator
+
+RBG（RoleBasedGroup）是 pd-manager 的底层工作负载 API，必须先安装。
+
+**方式 A（推荐）：使用预构建镜像和 manifest**
+
+```bash
+# 克隆 RBG 仓库
+git clone <rbg-repo-url> /home/a30/rbg-deployment/rbg
+cd /home/a30/rbg-deployment/rbg
+
+# 安装 RBG CRD
+kubectl apply -f config/crd/bases/
+
+# 构建并导入 RBG Operator 镜像（a30 containerd 环境）
+docker build -t rbg-operator:latest .
+docker save rbg-operator:latest | sudo ctr -n k8s.io images import -
+
+# 部署 RBG Operator
+make deploy IMG=rbg-operator:latest
+
+# 验证 RBG Operator Pod 就绪
+kubectl rollout status deploy/rbg-controller-manager -n rbg-system --timeout=120s
+kubectl get crd rolebasedgroups.workloads.x-k8s.io
+```
+
+**方式 B：若 RBG 有已发布的安装 manifest**
+
+```bash
+kubectl apply -f https://<rbg-release-url>/install.yaml
+```
+
+---
+
+### 步骤 2：安装 cert-manager（Webhook TLS 依赖）
+
+pd-manager 的 Admission Webhook 需要 TLS 证书。推荐使用 cert-manager 自动管理：
+
+**方式 A（推荐）：在线安装**
+
+```bash
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.3/cert-manager.yaml
+
+# 等待 cert-manager 组件就绪
+kubectl rollout status deploy/cert-manager -n cert-manager --timeout=120s
+kubectl rollout status deploy/cert-manager-webhook -n cert-manager --timeout=120s
+kubectl rollout status deploy/cert-manager-cainjector -n cert-manager --timeout=120s
+```
+
+**方式 B（离线环境，无 cert-manager）：手动创建自签证书**
+
+```bash
+# 提前创建 Namespace（make deploy 会自动创建，但手动证书需要先存在）
+kubectl create namespace pd-manager-system --dry-run=client -o yaml | kubectl apply -f -
+
+# 生成自签证书（CN 必须匹配 Webhook Service 地址）
+openssl req -x509 -newkey rsa:4096 -keyout /tmp/tls.key -out /tmp/tls.crt \
+  -days 3650 -nodes \
+  -subj "/CN=pd-manager-webhook-service.pd-manager-system.svc" \
+  -addext "subjectAltName=DNS:pd-manager-webhook-service.pd-manager-system.svc,DNS:pd-manager-webhook-service.pd-manager-system.svc.cluster.local"
+
+# 创建 TLS Secret
+kubectl create secret tls webhook-server-cert \
+  --cert=/tmp/tls.crt --key=/tmp/tls.key \
+  -n pd-manager-system
+
+# 获取 CA bundle（用于 Webhook 配置的 caBundle 字段）
+CA_BUNDLE=$(base64 -w0 /tmp/tls.crt)
+echo "caBundle: ${CA_BUNDLE}"
+# 后续需要将此 CA bundle 手动注入到 MutatingWebhookConfiguration 和 ValidatingWebhookConfiguration
+```
+
+---
+
+### 步骤 3：安装 ClusterEngineRuntimeProfile（patio sidecar 模板）
+
+patio sidecar 容器由 RBG 的 `ClusterEngineRuntimeProfile` CRD 管理，需预先创建：
+
+```bash
+cat <<'EOF' | kubectl apply -f -
+apiVersion: workloads.x-k8s.io/v1alpha1
+kind: ClusterEngineRuntimeProfile
+metadata:
+  name: sglang-pd-runtime
+spec:
+  containers:
+  - name: patio-runtime
+    image: <patio-image>:<tag>    # 替换为实际 patio 镜像地址
+    imagePullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: "1"
+        memory: 1Gi
+      limits:
+        cpu: "2"
+        memory: 2Gi
+EOF
+
+# 验证
+kubectl get clusterengineruntimeprofile sglang-pd-runtime
+```
+
+> **注意**：若不使用 patio sidecar（`engineRuntimes` 字段），可跳过此步骤。
+
+---
+
+### 步骤 4：获取 pd-manager 代码并构建镜像
+
+**方式 A（推荐）：直接从 Git 克隆**
+
+```bash
 mkdir -p /home/a30/rbg-deployment
 cd /home/a30/rbg-deployment
 
 # 克隆 pd-manager（含 vendor 目录，无需额外下载依赖）
-git clone https://github.com/jackyzzy/pd-manager.git pd-manager
-
-# 克隆 rbg 本地模块（go.mod replace 依赖）
-# 将 <rbg-repo-url> 替换为实际地址
-git clone <rbg-repo-url> rbg
-
-# 后续更新时在各目录执行 git pull 即可
+git clone <pd-manager-repo-url> pd-manager
 ```
 
-> **注意**：若 vendor/ 已提交到 git，克隆后无需再运行 `go mod vendor`。
-
-**方式 B（备选）：从 WSL rsync**
+**方式 B（备选）：从构建机 rsync**
 
 ```bash
-# 在 WSL 中执行（a30 无法访问 proxy.golang.org 时，需同步 vendor 目录）
+# 在构建机上执行（无法访问 proxy.golang.org 时，需同步 vendor 目录）
 rsync -avz --exclude='.git' --exclude='bin/' \
-  /home/zzy/code/pd-manager/ \
-  a30@183.56.181.9:/home/a30/rbg-deployment/pd-manager/ \
-  -e "ssh -p 34451"
-
-# 同步 rbg 本地模块
-rsync -avz --exclude='.git' \
-  /home/zzy/code/rbg/ \
-  a30@183.56.181.9:/home/a30/rbg-deployment/rbg/ \
-  -e "ssh -p 34451"
+  /path/to/pd-manager/ \
+  <user>@<target-host>:/home/a30/rbg-deployment/pd-manager/ \
+  -e "ssh -p <port>"
 ```
 
-### 2. 在 a30 上构建镜像并导入 containerd
+**构建并导入镜像**
 
 ```bash
-# 在 a30 上
 cd /home/a30/rbg-deployment/pd-manager
 
-# ── 若使用方式 B（rsync）且有 vendor 目录，需修复本地路径 ──────────────────────
-# sed -i 's|=> /home/zzy/code/rbg|=> ../rbg|g' vendor/modules.txt
-# ── 若使用方式 A（git clone）且 Dockerfile 走联网模式，跳过此步 ──────────────
-
-# 构建镜像（--network=host 绕过 iptables 问题）
-# 若 a30 无法访问 proxy.golang.org，需在 Dockerfile 中切换为 vendor 模式（见 Dockerfile 注释）
-docker build --network=host -t pd-manager:v0.0.1 .
+# 构建镜像（--platform linux/amd64 确保架构正确）
+docker build --platform linux/amd64 -t pd-manager:v0.0.6 .
 
 # 导入到 containerd（k8s.io 命名空间）
-docker save pd-manager:v0.0.1 | sudo ctr -n k8s.io images import -
+docker save pd-manager:v0.0.6 | sudo ctr -n k8s.io images import -
+
+# 验证镜像已导入
+sudo ctr -n k8s.io images list | grep pd-manager
 ```
 
-### 3. 在 a30 上部署 CRD + RBAC + Manager
+---
+
+### 步骤 5：安装 pd-manager CRD、RBAC 和 Operator
 
 ```bash
-# 在 a30 上
 cd /home/a30/rbg-deployment/pd-manager
 
-# 安装 CRD（包括 RBG CRD）
+# 创建 Namespace
+kubectl create namespace pd-manager-system --dry-run=client -o yaml | kubectl apply -f -
+
+# 安装 pd-manager CRD（PDInferenceService、PDEngineProfile）
 make install
 
-# 部署 Operator（使用本地镜像，imagePullPolicy: Never）
-make deploy IMG=pd-manager:v0.0.1
+# 验证 CRD 已安装
+kubectl get crd pdinferenceservices.pdai.pdai.io
+kubectl get crd pdengineprofiles.pdai.pdai.io
 
-# 验证 Manager Pod 就绪
-kubectl rollout status deploy/pd-manager-controller-manager -n pd-manager-system --timeout=60s
+# 部署 Operator（imagePullPolicy: IfNotPresent，使用已导入的本地镜像）
+make deploy IMG=pd-manager:v0.0.6
+
+# 等待 Operator Pod 就绪
+kubectl rollout status deploy/pd-manager-controller-manager -n pd-manager-system --timeout=120s
+
+# 验证 Pod 状态
+kubectl get pod -n pd-manager-system
+# 期望：pd-manager-controller-manager-xxx   1/1   Running
 ```
 
-### 4. 设置 pd-manager REST API 访问
+---
 
-pd-manager REST API 在 pod 内监听 8080 端口。设置 port-forward 到本地 18010 端口后即可使用：
+### 步骤 6：验证 REST API 可访问性
+
+pd-manager REST API 在 pod 内监听 8080 端口。在测试环境中通过 `kubectl port-forward` 访问：
 
 ```bash
-# 设置 pd-manager REST API port-forward（后台运行）
-PD_POD=$(kubectl get pod -n pd-manager-system -l control-plane=controller-manager -o jsonpath='{.items[0].metadata.name}')
+# 获取 Pod 名称并设置 port-forward
+PD_POD=$(kubectl get pod -n pd-manager-system -l control-plane=controller-manager \
+  -o jsonpath='{.items[0].metadata.name}')
 kubectl port-forward -n pd-manager-system pod/${PD_POD} --address=0.0.0.0 18010:8080 &
 
-# 验证访问
-curl http://127.0.0.1:18010/api/v1/pd-inference-services | jq .
+# 验证 API 可访问（应返回 {"items":[]}）
+curl http://127.0.0.1:18010/api/v1/pd-inference-services
+curl http://127.0.0.1:18010/api/v1/pd-engine-profiles
 ```
 
 > **注意**：pod 重启后 port-forward 会断开，需重新执行上述命令。
+> 若目标环境 hostPort 可用，`make deploy` 生成的 manifest 会将 8080 映射到 hostPort 18010，
+> 此时可直接访问 `http://<node-ip>:18010`，无需 port-forward。
 
-> **Webhook TLS**：a30 无 cert-manager，需手动配置自签证书。若 Pod 因 TLS 报错无法启动，参考以下命令生成并挂载：
-> ```bash
-> openssl req -x509 -newkey rsa:4096 -keyout tls.key -out tls.crt -days 365 -nodes -subj "/CN=pd-manager-webhook-service.pd-manager-system.svc"
-> kubectl create secret tls webhook-server-cert --cert=tls.crt --key=tls.key -n pd-manager-system
-> ```
+---
+
+至此，环境准备完成。以下进入功能验收用例。
 
 ---
 
