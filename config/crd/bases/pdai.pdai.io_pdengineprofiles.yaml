@@ -698,6 +698,30 @@ spec:
                       type: string
                     type: array
                 type: object
+              roleCommands:
+                description: |-
+                  RoleCommands provides default container commands for each role.
+                  Used when a PDInferenceService role's command field is empty.
+                properties:
+                  decode:
+                    description: Decode holds the default container command for the
+                      decode role.
+                    items:
+                      type: string
+                    type: array
+                  prefill:
+                    description: Prefill holds the default container command for the
+                      prefill role.
+                    items:
+                      type: string
+                    type: array
+                  router:
+                    description: Router holds the default container command for the
+                      router role.
+                    items:
+                      type: string
+                    type: array
+                type: object
             type: object
           status:
             description: PDEngineProfileStatus defines the observed state of PDEngineProfile.

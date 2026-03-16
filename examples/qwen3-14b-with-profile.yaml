@@ -1,0 +1,123 @@
+# Example: Qwen3-14B PD disaggregated inference on A30 GPUs — using PDEngineProfile template
+#
+# This is the simplified version of qwen3-14b.yaml.
+# Image, command, args, and patio sidecar config are all provided by the PDEngineProfile template;
+# only hardware-related fields (volumes, resources, gpu, volumeMounts, probes) are specified here.
+#
+# Usage (apply profile first, then the inference service):
+#   kubectl apply -f examples/sglang-a30-qwen3-14b-profile.yaml
+#   kubectl apply -f examples/qwen3-14b-with-profile.yaml
+#
+# Prerequisites:
+#   - PDEngineProfile "sglang-a30-qwen3-14b" must exist (see sglang-a30-qwen3-14b-profile.yaml)
+#   - ClusterEngineRuntimeProfile "sglang-pd-runtime" must exist in the cluster
+#   - Model files at /data/model/qwen3-14b on the node
+apiVersion: pdai.pdai.io/v1alpha1
+kind: PDInferenceService
+metadata:
+  name: qwen3-14b
+  namespace: default
+spec:
+  model: Qwen/Qwen3-14B
+
+  # Reference to the PDEngineProfile template — provides image, command, args, and engineRuntimes.
+  engineProfileRef: sglang-a30-qwen3-14b
+
+  volumes:
+  - name: model-storage
+    hostPath:
+      path: /data/model/qwen3-14b
+      type: Directory
+  - name: dshm
+    emptyDir:
+      medium: Memory
+      sizeLimit: 20Gi
+
+  router:
+    replicas: 1
+    resources:
+      requests:
+        memory: 4Gi
+        cpu: "4"
+      limits:
+        memory: 4Gi
+        cpu: "4"
+    volumeMounts:
+    - name: model-storage
+      mountPath: /models
+    readinessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+    livenessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 120
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 3
+
+  prefill:
+    replicas: 1
+    gpu: "2"
+    gpuType: a30
+    resources:
+      requests:
+        memory: 96Gi
+        cpu: "16"
+      limits:
+        memory: 128Gi
+        cpu: "32"
+    volumeMounts:
+    - name: model-storage
+      mountPath: /models
+    - name: dshm
+      mountPath: /dev/shm
+    readinessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 10
+    livenessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 300
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 3
+
+  decode:
+    replicas: 1
+    gpu: "2"
+    gpuType: a30
+    resources:
+      requests:
+        memory: 96Gi
+        cpu: "16"
+      limits:
+        memory: 128Gi
+        cpu: "32"
+    volumeMounts:
+    - name: model-storage
+      mountPath: /models
+    - name: dshm
+      mountPath: /dev/shm
+    readinessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 10
+    livenessProbe:
+      httpPath: /health
+      port: 8000
+      initialDelaySeconds: 480
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 3

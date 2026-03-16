@@ -1,0 +1,128 @@
+# PDEngineProfile: SGLang A30 GPU Qwen3-14B 推理引擎配置模板
+#
+# 用途：由平台/运维团队统一维护，固化 A30 GPU + Qwen3-14B 场景下已验证的
+#       镜像版本、启动命令、启动参数和 patio sidecar 配置。
+#       业务用户通过 engineProfileRef 引用本模板，无需重复填写这些参数。
+#
+# 使用方式（先创建模板，再创建推理服务）：
+#   kubectl apply -f examples/sglang-a30-qwen3-14b-profile.yaml
+#   kubectl apply -f examples/qwen3-14b-with-profile.yaml
+#
+# 前置条件：
+#   - ClusterEngineRuntimeProfile "sglang-pd-runtime" 已存在（patio sidecar 镜像来源）
+apiVersion: pdai.pdai.io/v1alpha1
+kind: PDEngineProfile
+metadata:
+  name: sglang-a30-qwen3-14b
+  namespace: default
+spec:
+  description: "SGLang PD disaggregated inference on A30 GPU (2-GPU TP) for Qwen3-14B"
+
+  # 各角色容器镜像
+  images:
+    router: lmsysorg/sgl-model-gateway:v0.3.1
+    prefill: lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
+    decode:  lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
+
+  # 容器启动命令（覆盖镜像 ENTRYPOINT）
+  # sglang 镜像 ENTRYPOINT 为 /opt/nvidia/nvidia_entrypoint.sh，
+  # 需通过 command 指定实际启动程序
+  roleCommands:
+    prefill:
+    - python3
+    - -m
+    - sglang.launch_server
+    decode:
+    - python3
+    - -m
+    - sglang.launch_server
+
+  # 各角色启动参数
+  roleArgs:
+    router:
+    - --log-level
+    - info
+    - --pd-disaggregation
+    - --host
+    - 0.0.0.0
+    - --port
+    - "8000"
+    - --model-path
+    - /models
+    - --policy
+    - random
+    - --prometheus-host
+    - 0.0.0.0
+    - --prometheus-port
+    - "9090"
+    prefill:
+    - --model-path
+    - /models
+    - --trust-remote-code
+    - --disable-radix-cache
+    - --tp-size
+    - "2"
+    - --host
+    - $(POD_IP)
+    - --port
+    - "8000"
+    - --disaggregation-mode
+    - prefill
+    - --disaggregation-transfer-backend
+    - nixl
+    - --mem-fraction-static
+    - "0.88"
+    - --chunked-prefill-size
+    - "8192"
+    - --page-size
+    - "128"
+    - --cuda-graph-max-bs
+    - "256"
+    decode:
+    - --model-path
+    - /models
+    - --trust-remote-code
+    - --disable-radix-cache
+    - --tp-size
+    - "2"
+    - --host
+    - $(POD_IP)
+    - --port
+    - "8000"
+    - --disaggregation-mode
+    - decode
+    - --disaggregation-transfer-backend
+    - nixl
+    - --mem-fraction-static
+    - "0.88"
+    - --chunked-prefill-size
+    - "8192"
+    - --page-size
+    - "128"
+    - --cuda-graph-max-bs
+    - "256"
+
+  # patio sidecar 配置（负责 prefill/decode worker 动态注册到 router）
+  engineRuntimes:
+    prefill:
+    - profileName: sglang-pd-runtime
+      containers:
+      - name: patio-runtime
+        args:
+        - '--instance-info={"data":{"port":8000,"worker_type":"prefill","bootstrap_port":8998},"topo_type":"sglang"}'
+        env:
+        - name: SGL_ROUTER_PORT
+          value: "8000"
+        - name: ROLE_NAME
+          value: prefill
+    decode:
+    - profileName: sglang-pd-runtime
+      containers:
+      - name: patio-runtime
+        args:
+        - '--instance-info={"data":{"port":8000,"worker_type":"decode"},"topo_type":"sglang"}'
+        env:
+        - name: SGL_ROUTER_PORT
+          value: "8000"
+        - name: ROLE_NAME
+          value: decode

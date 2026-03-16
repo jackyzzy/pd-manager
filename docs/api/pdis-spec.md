@@ -275,6 +275,7 @@ PDEngineProfile 是**推理引擎配置模板**，用于固化特定硬件 + 模
 | `spec.description` | string | 人可读描述，说明该模板适用的硬件/模型场景 |
 | `spec.applicability` | ApplicabilitySpec | 适用条件（GPU 类型、内存要求等），仅作参考，pd-manager 不自动匹配 |
 | `spec.images` | RoleImages | 三角色容器镜像（`router`、`prefill`、`decode`）；PDIS 内联 image 为空时使用模板值 |
+| `spec.roleCommands` | RoleCommands | 三角色容器启动命令（`router`、`prefill`、`decode`），覆盖镜像 ENTRYPOINT；PDIS 内联 command 为空时使用模板值 |
 | `spec.roleArgs` | RoleArgs | 三角色启动参数（`router`、`prefill`、`decode`）；PDIS 内联 args 为空时使用模板值 |
 | `spec.engineRuntimes` | RoleEngineRuntimes | patio sidecar 配置（`prefill`、`decode`）；PDIS 内联 engineRuntimes 为空时使用模板值 |
 
@@ -298,6 +299,15 @@ spec:
     router: lmsysorg/sgl-model-gateway:v0.3.1
     prefill: lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
     decode:  lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
+  roleCommands:                              # 容器启动命令（覆盖镜像 ENTRYPOINT）
+    prefill:
+    - python3
+    - -m
+    - sglang.launch_server
+    decode:
+    - python3
+    - -m
+    - sglang.launch_server
   roleArgs:
     router:
     - --log-level
@@ -388,7 +398,7 @@ spec:
 
 ### 使用配置模板创建推理服务（kubectl）
 
-引用模板的 PDIS 只需提供硬件相关字段（replicas、gpu、gpuType、resources、volumeMounts、command、probes），镜像、args、engineRuntimes 全部由模板提供：
+引用模板的 PDIS 只需提供硬件相关字段（replicas、gpu、gpuType、resources、volumeMounts、probes），镜像、command、args、engineRuntimes 全部由模板提供：
 
 ```yaml
 apiVersion: pdai.pdai.io/v1alpha1
@@ -453,10 +463,7 @@ spec:
       mountPath: /models
     - name: dshm
       mountPath: /dev/shm
-    command:
-    - python3
-    - -m
-    - sglang.launch_server
+    # command 由模板 roleCommands.prefill 提供，此处无需填写
     readinessProbe:
       httpPath: /health
       port: 8000
@@ -488,10 +495,7 @@ spec:
       mountPath: /models
     - name: dshm
       mountPath: /dev/shm
-    command:
-    - python3
-    - -m
-    - sglang.launch_server
+    # command 由模板 roleCommands.decode 提供，此处无需填写
     readinessProbe:
       httpPath: /health
       port: 8000
@@ -540,7 +544,6 @@ curl -X POST http://localhost:18010/api/v1/pd-inference-services \
       "gpuType": "a30",
       "resources": {"requests": {"memory": "96Gi", "cpu": "16"}, "limits": {"memory": "128Gi", "cpu": "32"}},
       "volumeMounts": [{"name": "model-storage", "mountPath": "/models"}, {"name": "dshm", "mountPath": "/dev/shm"}],
-      "command": ["python3", "-m", "sglang.launch_server"],
       "readinessProbe": {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 30,
                          "periodSeconds": 10, "timeoutSeconds": 5, "failureThreshold": 10},
       "livenessProbe":  {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 300,
@@ -552,7 +555,6 @@ curl -X POST http://localhost:18010/api/v1/pd-inference-services \
       "gpuType": "a30",
       "resources": {"requests": {"memory": "96Gi", "cpu": "16"}, "limits": {"memory": "128Gi", "cpu": "32"}},
       "volumeMounts": [{"name": "model-storage", "mountPath": "/models"}, {"name": "dshm", "mountPath": "/dev/shm"}],
-      "command": ["python3", "-m", "sglang.launch_server"],
       "readinessProbe": {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 30,
                          "periodSeconds": 10, "timeoutSeconds": 5, "failureThreshold": 10},
       "livenessProbe":  {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 480,
@@ -563,4 +565,4 @@ curl -X POST http://localhost:18010/api/v1/pd-inference-services \
 EOF
 ```
 
-与直接内联配置相比，引用配置模板后 PDIS 的 JSON body 减少了约 60% 的内容（无需填写 image、args、engineRuntimes）。
+与直接内联配置相比，引用配置模板后 PDIS 的 JSON body 减少了约 70% 的内容（无需填写 image、command、args、engineRuntimes）。

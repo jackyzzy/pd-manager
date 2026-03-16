@@ -811,7 +811,7 @@ kubectl delete pdis qwen3-14b
 PDEngineProfile 是**推理引擎配置模板**，固化特定硬件 + 模型组合下已优化的镜像和启动参数，供业务用户通过 `engineProfileRef` 快速复用。
 
 > **概念区分**：
-> - **PDEngineProfile**：存放推理引擎镜像和 args 参数（`roleArgs`、`images`），是面向用户的配置复用机制
+> - **PDEngineProfile**：存放推理引擎镜像、启动命令和 args 参数（`images`、`roleCommands`、`roleArgs`），是面向用户的配置复用机制
 > - **engineRuntimes（patio）**：基础设施 sidecar，负责将 prefill/decode worker 动态注册到 router；可以内联在 PDIS 中，也可以放入 Profile 的 `engineRuntimes` 字段统一管理
 
 ### 6.1 kubectl 操作 PDEngineProfile
@@ -830,6 +830,15 @@ spec:
     router: lmsysorg/sgl-model-gateway:v0.3.1
     prefill: lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
     decode:  lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
+  roleCommands:
+    prefill:
+    - python3
+    - -m
+    - sglang.launch_server
+    decode:
+    - python3
+    - -m
+    - sglang.launch_server
   roleArgs:
     router:
     - --log-level
@@ -965,6 +974,10 @@ curl -X POST http://localhost:18010/api/v1/pd-engine-profiles \
       "prefill": "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime",
       "decode":  "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime"
     },
+    "roleCommands": {
+      "prefill": ["python3", "-m", "sglang.launch_server"],
+      "decode":  ["python3", "-m", "sglang.launch_server"]
+    },
     "roleArgs": {
       "router": ["--log-level","info","--pd-disaggregation","--host","0.0.0.0","--port","8000",
                  "--model-path","/models","--policy","random",
@@ -1015,6 +1028,10 @@ curl -X PUT http://localhost:18010/api/v1/pd-engine-profiles/sglang-a30-qwen3-14
       "router": "lmsysorg/sgl-model-gateway:v0.3.1",
       "prefill": "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime",
       "decode":  "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime"
+    },
+    "roleCommands": {
+      "prefill": ["python3", "-m", "sglang.launch_server"],
+      "decode":  ["python3", "-m", "sglang.launch_server"]
     },
     "roleArgs": {
       "router": ["--log-level","info","--pd-disaggregation","--host","0.0.0.0","--port","8000",
@@ -1067,6 +1084,10 @@ curl -X POST http://localhost:18010/api/v1/pd-engine-profiles \
       "prefill": "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime",
       "decode":  "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime"
     },
+    "roleCommands": {
+      "prefill": ["python3", "-m", "sglang.launch_server"],
+      "decode":  ["python3", "-m", "sglang.launch_server"]
+    },
     "roleArgs": {
       "router": ["--log-level","info","--pd-disaggregation","--host","0.0.0.0","--port","8000",
                  "--model-path","/models","--policy","random",
@@ -1108,7 +1129,7 @@ EOF
 ### 7.1 kubectl 使用模板创建推理服务
 
 ```bash
-# 创建使用模板的简化 PDIS（只填硬件参数，镜像/args/engineRuntimes 全由模板提供）
+# 创建使用模板的简化 PDIS（只填硬件参数，镜像/command/args/engineRuntimes 全由模板提供）
 cat > /tmp/pdis-with-profile.yaml << 'EOF'
 apiVersion: pdai.pdai.io/v1alpha1
 kind: PDInferenceService
@@ -1172,10 +1193,7 @@ spec:
       mountPath: /models
     - name: dshm
       mountPath: /dev/shm
-    command:
-    - python3
-    - -m
-    - sglang.launch_server
+    # command 由模板 roleCommands.prefill 提供，此处无需填写
     readinessProbe:
       httpPath: /health
       port: 8000
@@ -1207,10 +1225,7 @@ spec:
       mountPath: /models
     - name: dshm
       mountPath: /dev/shm
-    command:
-    - python3
-    - -m
-    - sglang.launch_server
+    # command 由模板 roleCommands.decode 提供，此处无需填写
     readinessProbe:
       httpPath: /health
       port: 8000
@@ -1318,7 +1333,6 @@ curl -X POST http://localhost:18010/api/v1/pd-inference-services \
       "gpuType": "a30",
       "resources": {"requests": {"memory": "96Gi", "cpu": "16"}, "limits": {"memory": "128Gi", "cpu": "32"}},
       "volumeMounts": [{"name": "model-storage", "mountPath": "/models"}, {"name": "dshm", "mountPath": "/dev/shm"}],
-      "command": ["python3", "-m", "sglang.launch_server"],
       "readinessProbe": {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 30,
                          "periodSeconds": 10, "timeoutSeconds": 5, "failureThreshold": 10},
       "livenessProbe":  {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 300,
@@ -1330,7 +1344,6 @@ curl -X POST http://localhost:18010/api/v1/pd-inference-services \
       "gpuType": "a30",
       "resources": {"requests": {"memory": "96Gi", "cpu": "16"}, "limits": {"memory": "128Gi", "cpu": "32"}},
       "volumeMounts": [{"name": "model-storage", "mountPath": "/models"}, {"name": "dshm", "mountPath": "/dev/shm"}],
-      "command": ["python3", "-m", "sglang.launch_server"],
       "readinessProbe": {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 30,
                          "periodSeconds": 10, "timeoutSeconds": 5, "failureThreshold": 10},
       "livenessProbe":  {"httpPath": "/health", "port": 8000, "initialDelaySeconds": 480,

@@ -49,8 +49,8 @@ func (b *RBGBuilder) Build(pdis *v1alpha1.PDInferenceService, cfg *config.Merged
 	}
 
 	routerRole := b.buildRouterRole(pdis, cfg)
-	prefillRole := b.buildInferenceRole("prefill", pdis, &pdis.Spec.Prefill, cfg.Images.Prefill, cfg.PrefillArgs, resolveEngineRuntimes(pdis.Spec.Prefill.EngineRuntimes, profilePrefill))
-	decodeRole := b.buildInferenceRole("decode", pdis, &pdis.Spec.Decode, cfg.Images.Decode, cfg.DecodeArgs, resolveEngineRuntimes(pdis.Spec.Decode.EngineRuntimes, profileDecode))
+	prefillRole := b.buildInferenceRole("prefill", pdis, &pdis.Spec.Prefill, cfg.Images.Prefill, cfg.PrefillCommand, cfg.PrefillArgs, resolveEngineRuntimes(pdis.Spec.Prefill.EngineRuntimes, profilePrefill))
+	decodeRole := b.buildInferenceRole("decode", pdis, &pdis.Spec.Decode, cfg.Images.Decode, cfg.DecodeCommand, cfg.DecodeArgs, resolveEngineRuntimes(pdis.Spec.Decode.EngineRuntimes, profileDecode))
 
 	rbg := &rbgv1alpha1.RoleBasedGroup{
 		ObjectMeta: metav1.ObjectMeta{
@@ -105,7 +105,7 @@ func (b *RBGBuilder) buildRouterRole(pdis *v1alpha1.PDInferenceService, cfg *con
 						{
 							Name:           "router",
 							Image:          cfg.Images.Router,
-							Command:        pdis.Spec.Router.Command,
+							Command:        cfg.RouterCommand,
 							Args:           cfg.RouterArgs,
 							VolumeMounts:   volumeMounts,
 							Resources:      resources,
@@ -120,13 +120,14 @@ func (b *RBGBuilder) buildRouterRole(pdis *v1alpha1.PDInferenceService, cfg *con
 	return roleSpec
 }
 
-// buildInferenceRole builds a prefill or decode role. Args are taken directly from
-// the merged config (no auto-injection). POD_IP is injected via Downward API.
+// buildInferenceRole builds a prefill or decode role. Command and args are taken directly
+// from the merged config (no auto-injection). POD_IP is injected via Downward API.
 func (b *RBGBuilder) buildInferenceRole(
 	roleName string,
 	pdis *v1alpha1.PDInferenceService,
 	roleSpec *v1alpha1.InferenceRoleSpec,
 	image string,
+	command []string,
 	args []string,
 	engineRuntimes []rbgv1alpha1.EngineRuntime,
 ) rbgv1alpha1.RoleSpec {
@@ -152,7 +153,7 @@ func (b *RBGBuilder) buildInferenceRole(
 			{
 				Name:           roleName,
 				Image:          image,
-				Command:        roleSpec.Command,
+				Command:        command,
 				Args:           args,
 				Env:            env,
 				Resources:      resources,

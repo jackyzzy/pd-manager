@@ -197,6 +197,78 @@ func TestMerge_InlineImageOverridesProfile(t *testing.T) {
 	}
 }
 
+// TestMerge_CommandFromProfile verifies that when a profile specifies RoleCommands and
+// the PDIS has no inline command, MergedConfig gets the command from the profile.
+func TestMerge_CommandFromProfile(t *testing.T) {
+	profile := &v1alpha1.PDEngineProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "cmd-profile", Namespace: "default"},
+		Spec: v1alpha1.PDEngineProfileSpec{
+			Images: v1alpha1.RoleImages{Router: "s", Prefill: "p", Decode: "d"},
+			RoleCommands: &v1alpha1.RoleCommands{
+				Prefill: []string{"python3", "-m", "sglang.launch_server"},
+				Decode:  []string{"python3", "-m", "sglang.launch_server"},
+			},
+		},
+	}
+
+	pdis := &v1alpha1.PDInferenceService{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+		Spec: v1alpha1.PDInferenceServiceSpec{
+			EngineProfileRef: "cmd-profile",
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(profile).Build()
+	merged, err := config.NewMerger(cl).Resolve(context.Background(), pdis)
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if len(merged.PrefillCommand) != 3 || merged.PrefillCommand[0] != "python3" {
+		t.Errorf("PrefillCommand should come from profile, got %v", merged.PrefillCommand)
+	}
+	if len(merged.DecodeCommand) != 3 || merged.DecodeCommand[0] != "python3" {
+		t.Errorf("DecodeCommand should come from profile, got %v", merged.DecodeCommand)
+	}
+	if len(merged.RouterCommand) != 0 {
+		t.Errorf("RouterCommand should be empty (not set in profile), got %v", merged.RouterCommand)
+	}
+}
+
+// TestMerge_InlineCommandOverridesProfile verifies that non-empty inline command
+// on the PDIS completely overrides the profile command.
+func TestMerge_InlineCommandOverridesProfile(t *testing.T) {
+	profile := &v1alpha1.PDEngineProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "cmd-profile", Namespace: "default"},
+		Spec: v1alpha1.PDEngineProfileSpec{
+			Images: v1alpha1.RoleImages{Router: "s", Prefill: "p", Decode: "d"},
+			RoleCommands: &v1alpha1.RoleCommands{
+				Prefill: []string{"python3", "-m", "sglang.launch_server"},
+			},
+		},
+	}
+
+	pdis := &v1alpha1.PDInferenceService{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+		Spec: v1alpha1.PDInferenceServiceSpec{
+			EngineProfileRef: "cmd-profile",
+			Prefill: v1alpha1.InferenceRoleSpec{
+				Command: []string{"custom-entrypoint"},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(profile).Build()
+	merged, err := config.NewMerger(cl).Resolve(context.Background(), pdis)
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if len(merged.PrefillCommand) != 1 || merged.PrefillCommand[0] != "custom-entrypoint" {
+		t.Errorf("expected inline command to win, got %v", merged.PrefillCommand)
+	}
+}
+
 // TestMerge_ProfileNotFound verifies that referencing a non-existent profile returns an error.
 func TestMerge_ProfileNotFound(t *testing.T) {
 	pdis := &v1alpha1.PDInferenceService{

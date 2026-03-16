@@ -77,6 +77,18 @@ type RoleEngineRuntimes struct {
 	Decode  []EngineRuntime `json:"decode,omitempty"`
 }
 
+// RoleCommands defines the container command (entrypoint override) for each role.
+// When a PDInferenceService references a profile via engineProfileRef and a role's
+// command field is empty, the profile's command is used as the default.
+type RoleCommands struct {
+	// Router holds the default container command for the router role.
+	Router []string `json:"router,omitempty"`
+	// Prefill holds the default container command for the prefill role.
+	Prefill []string `json:"prefill,omitempty"`
+	// Decode holds the default container command for the decode role.
+	Decode []string `json:"decode,omitempty"`
+}
+
 // RoleArgs defines per-role startup argument templates in a PDEngineProfile.
 // When a PDInferenceService references a profile via engineProfileRef and a role's
 // args field is empty, the profile's args are used as the default.
@@ -100,6 +112,10 @@ type PDEngineProfileSpec struct {
 	// Images specifies the container images for each role.
 	// Used as defaults when a PDInferenceService role's image field is empty.
 	Images RoleImages `json:"images,omitempty"`
+
+	// RoleCommands provides default container commands for each role.
+	// Used when a PDInferenceService role's command field is empty.
+	RoleCommands *RoleCommands `json:"roleCommands,omitempty"`
 
 	// RoleArgs provides default startup args for each role.
 	// Used when a PDInferenceService role's args field is empty.

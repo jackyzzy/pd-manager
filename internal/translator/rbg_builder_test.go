@@ -510,6 +510,66 @@ func TestBuild_EmptyDirVolume(t *testing.T) {
 	t.Error("dshm volume not found in prefill pod")
 }
 
+// TestBuild_CommandFromMergedConfig verifies that when MergedConfig carries a PrefillCommand,
+// the prefill container's Command field is set correctly (not from roleSpec.Command).
+func TestBuild_CommandFromMergedConfig(t *testing.T) {
+	pdis := makePDIS("svc1")
+	// PDIS has no inline command on prefill
+	pdis.Spec.Prefill.Command = nil
+
+	cfg := makeMergedConfig()
+	cfg.PrefillCommand = []string{"python3", "-m", "sglang.launch_server"}
+
+	b := translator.NewRBGBuilder()
+	rbg, err := b.Build(pdis, cfg)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	prefill := findRole(rbg, "prefill")
+	if prefill == nil || prefill.Template == nil || len(prefill.Template.Spec.Containers) == 0 {
+		t.Fatal("prefill missing")
+	}
+	cmd := prefill.Template.Spec.Containers[0].Command
+	if len(cmd) != 3 || cmd[0] != "python3" || cmd[1] != "-m" || cmd[2] != "sglang.launch_server" {
+		t.Errorf("prefill Command should come from MergedConfig, got %v", cmd)
+	}
+}
+
+// TestBuild_InlineEngineRuntimesOverrideProfile verifies that when both MergedConfig.EngineRuntimes
+// (from profile) and pdis.Spec.Prefill.EngineRuntimes (inline) are non-empty,
+// the inline runtime wins for the prefill role.
+func TestBuild_InlineEngineRuntimesOverrideProfile(t *testing.T) {
+	pdis := makePDIS("svc1")
+	pdis.Spec.Prefill.EngineRuntimes = []v1alpha1.EngineRuntime{
+		{ProfileName: "inline-runtime", Containers: []v1alpha1.RuntimeContainer{{Name: "inline-ct"}}},
+	}
+
+	cfg := makeMergedConfig()
+	cfg.EngineRuntimes = &v1alpha1.RoleEngineRuntimes{
+		Prefill: []v1alpha1.EngineRuntime{
+			{ProfileName: "profile-runtime", Containers: []v1alpha1.RuntimeContainer{{Name: "profile-ct"}}},
+		},
+	}
+
+	b := translator.NewRBGBuilder()
+	rbg, err := b.Build(pdis, cfg)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	prefill := findRole(rbg, "prefill")
+	if prefill == nil {
+		t.Fatal("prefill role not found")
+	}
+	if len(prefill.EngineRuntimes) != 1 {
+		t.Fatalf("expected 1 engine runtime on prefill, got %d", len(prefill.EngineRuntimes))
+	}
+	if prefill.EngineRuntimes[0].ProfileName != "inline-runtime" {
+		t.Errorf("inline engineRuntime should override profile runtime, got %v", prefill.EngineRuntimes[0].ProfileName)
+	}
+}
+
 // TestBuild_WorkloadSpec verifies each role has the required WorkloadSpec.
 func TestBuild_WorkloadSpec(t *testing.T) {
 	b := translator.NewRBGBuilder()

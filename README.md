@@ -223,6 +223,9 @@ spec:
     router:  lmsysorg/sgl-model-gateway:v0.3.1
     prefill: lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
     decode:  lmsysorg/sglang:v0.5.8-cu130-amd64-runtime
+  roleCommands:                  # container command (overrides image ENTRYPOINT)
+    prefill: [python3, -m, sglang.launch_server]
+    decode:  [python3, -m, sglang.launch_server]
   roleArgs:
     prefill:
     - --disaggregation-transfer-backend

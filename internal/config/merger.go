@@ -29,11 +29,18 @@ import (
 // (if referenced) with the inline per-role configuration of a PDInferenceService.
 //
 // Priority: inline CR fields > PDEngineProfile defaults.
-// For images and args: if the CR role field is non-empty, it takes full precedence
-// over the profile (no concatenation – profiles provide defaults, not additions).
+// For all fields (images, command, args): if the CR role field is non-empty, it takes
+// full precedence over the profile (no concatenation – profiles provide defaults, not additions).
 type MergedConfig struct {
 	// Images holds the resolved container image for each role.
 	Images v1alpha1.RoleImages
+
+	// RouterCommand is the resolved container command for the router role.
+	RouterCommand []string
+	// PrefillCommand is the resolved container command for the prefill role.
+	PrefillCommand []string
+	// DecodeCommand is the resolved container command for the decode role.
+	DecodeCommand []string
 
 	// RouterArgs is the resolved startup args for the router role.
 	RouterArgs []string
@@ -86,7 +93,18 @@ func (m *Merger) Resolve(ctx context.Context, pdis *v1alpha1.PDInferenceService)
 		merged.Images.Decode = pdis.Spec.Decode.Image
 	}
 
-	// Step 3: Inline per-role args override profile args (non-empty wins).
+	// Step 3: Inline per-role command override profile command (non-empty wins).
+	if len(pdis.Spec.Router.Command) > 0 {
+		merged.RouterCommand = pdis.Spec.Router.Command
+	}
+	if len(pdis.Spec.Prefill.Command) > 0 {
+		merged.PrefillCommand = pdis.Spec.Prefill.Command
+	}
+	if len(pdis.Spec.Decode.Command) > 0 {
+		merged.DecodeCommand = pdis.Spec.Decode.Command
+	}
+
+	// Step 4: Inline per-role args override profile args (non-empty wins).
 	if len(pdis.Spec.Router.Args) > 0 {
 		merged.RouterArgs = pdis.Spec.Router.Args
 	}
@@ -103,6 +121,11 @@ func (m *Merger) Resolve(ctx context.Context, pdis *v1alpha1.PDInferenceService)
 // applyProfile loads the base configuration from a PDEngineProfile.
 func (m *MergedConfig) applyProfile(profile *v1alpha1.PDEngineProfile) {
 	m.Images = profile.Spec.Images
+	if rc := profile.Spec.RoleCommands; rc != nil {
+		m.RouterCommand = rc.Router
+		m.PrefillCommand = rc.Prefill
+		m.DecodeCommand = rc.Decode
+	}
 	if ra := profile.Spec.RoleArgs; ra != nil {
 		m.RouterArgs = ra.Router
 		m.PrefillArgs = ra.Prefill
