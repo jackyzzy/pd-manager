@@ -396,6 +396,84 @@ spec:
           value: decode
 ```
 
+### 通过 REST API 创建配置模板
+
+```bash
+curl -X POST http://localhost:18010/api/v1/pd-engine-profiles \
+  -H "Content-Type: application/json" \
+  -d @- << 'EOF'
+{
+  "apiVersion": "pdai.pdai.io/v1alpha1",
+  "kind": "PDEngineProfile",
+  "metadata": {"name": "sglang-a30-qwen3-14b", "namespace": "default"},
+  "spec": {
+    "description": "SGLang PD disaggregated inference on A30 GPU (2-GPU TP) for Qwen3-14B",
+    "images": {
+      "router":  "lmsysorg/sgl-model-gateway:v0.3.1",
+      "prefill": "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime",
+      "decode":  "lmsysorg/sglang:v0.5.8-cu130-amd64-runtime"
+    },
+    "roleCommands": {
+      "prefill": ["python3", "-m", "sglang.launch_server"],
+      "decode":  ["python3", "-m", "sglang.launch_server"]
+    },
+    "roleArgs": {
+      "router": [
+        "--log-level", "info", "--pd-disaggregation",
+        "--host", "0.0.0.0", "--port", "8000",
+        "--model-path", "/models", "--policy", "random",
+        "--prometheus-host", "0.0.0.0", "--prometheus-port", "9090"
+      ],
+      "prefill": [
+        "--model-path", "/models", "--trust-remote-code", "--disable-radix-cache",
+        "--tp-size", "2", "--host", "$(POD_IP)", "--port", "8000",
+        "--disaggregation-mode", "prefill", "--disaggregation-transfer-backend", "nixl",
+        "--mem-fraction-static", "0.88", "--chunked-prefill-size", "8192",
+        "--page-size", "128", "--cuda-graph-max-bs", "256"
+      ],
+      "decode": [
+        "--model-path", "/models", "--trust-remote-code", "--disable-radix-cache",
+        "--tp-size", "2", "--host", "$(POD_IP)", "--port", "8000",
+        "--disaggregation-mode", "decode", "--disaggregation-transfer-backend", "nixl",
+        "--mem-fraction-static", "0.88", "--chunked-prefill-size", "8192",
+        "--page-size", "128", "--cuda-graph-max-bs", "256"
+      ]
+    },
+    "engineRuntimes": {
+      "prefill": [{
+        "profileName": "sglang-pd-runtime",
+        "containers": [{
+          "name": "patio-runtime",
+          "args": ["--instance-info={\"data\":{\"port\":8000,\"worker_type\":\"prefill\",\"bootstrap_port\":8998},\"topo_type\":\"sglang\"}"],
+          "env": [{"name": "SGL_ROUTER_PORT", "value": "8000"}, {"name": "ROLE_NAME", "value": "prefill"}]
+        }]
+      }],
+      "decode": [{
+        "profileName": "sglang-pd-runtime",
+        "containers": [{
+          "name": "patio-runtime",
+          "args": ["--instance-info={\"data\":{\"port\":8000,\"worker_type\":\"decode\"},\"topo_type\":\"sglang\"}"],
+          "env": [{"name": "SGL_ROUTER_PORT", "value": "8000"}, {"name": "ROLE_NAME", "value": "decode"}]
+        }]
+      }]
+    }
+  }
+}
+EOF
+```
+
+查询已创建的模板：
+
+```bash
+# 查询单个模板
+curl http://localhost:18010/api/v1/pd-engine-profiles/sglang-a30-qwen3-14b | jq .
+
+# 列出所有模板
+curl http://localhost:18010/api/v1/pd-engine-profiles | jq '.items[].metadata.name'
+```
+
+---
+
 ### 使用配置模板创建推理服务（kubectl）
 
 引用模板的 PDIS 只需提供硬件相关字段（replicas、gpu、gpuType、resources、volumeMounts、probes），镜像、command、args、engineRuntimes 全部由模板提供：
@@ -521,7 +599,7 @@ curl -X POST http://localhost:18010/api/v1/pd-inference-services \
 {
   "apiVersion": "pdai.pdai.io/v1alpha1",
   "kind": "PDInferenceService",
-  "metadata": {"name": "qwen3-14b", "namespace": "default"},
+  "metadata": {"name": "qwen3-14b-with-profile", "namespace": "default"},
   "spec": {
     "model": "Qwen/Qwen3-14B",
     "engineProfileRef": "sglang-a30-qwen3-14b",
