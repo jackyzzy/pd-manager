@@ -138,7 +138,7 @@ func TestMain_ManagerStartup(t *testing.T) {
 
 	// Register API server as a Runnable.
 	apiPort := freePort(t)
-	apiSrv := apiserver.New(fmt.Sprintf(":%d", apiPort), mgr.GetClient(), mgr.GetScheme())
+	apiSrv := apiserver.New(fmt.Sprintf(":%d", apiPort), mgr.GetClient(), mgr.GetAPIReader(), mgr.GetScheme())
 	if err := mgr.Add(apiSrv); err != nil {
 		t.Fatalf("failed to add API server to manager: %v", err)
 	}

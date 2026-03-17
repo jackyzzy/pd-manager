@@ -37,7 +37,8 @@ func newProfileHandler(objs ...runtime.Object) *handler.Handler {
 	for _, o := range objs {
 		b = b.WithRuntimeObjects(o)
 	}
-	return handler.New(b.Build(), s)
+	cl := b.Build()
+	return handler.New(cl, cl, s)
 }
 
 func makeProfile(name string) *pdaiv1alpha1.PDEngineProfile {

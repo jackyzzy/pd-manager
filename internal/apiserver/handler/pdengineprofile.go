@@ -31,7 +31,7 @@ import (
 // ListProfiles handles GET /api/v1/pd-engine-profiles.
 func (h *Handler) ListProfiles(w http.ResponseWriter, r *http.Request) {
 	list := &pdaiv1alpha1.PDEngineProfileList{}
-	if err := h.client.List(context.Background(), list, client.InNamespace("default")); err != nil {
+	if err := h.reader.List(context.Background(), list, client.InNamespace("default")); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -64,7 +64,7 @@ func (h *Handler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) GetProfile(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	profile := &pdaiv1alpha1.PDEngineProfile{}
-	if err := h.client.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "default"}, profile); err != nil {
+	if err := h.reader.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "default"}, profile); err != nil {
 		if errors.IsNotFound(err) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -88,7 +88,7 @@ func (h *Handler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	profile := &pdaiv1alpha1.PDEngineProfile{}
-	if err := h.client.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "default"}, profile); err != nil {
+	if err := h.reader.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "default"}, profile); err != nil {
 		if errors.IsNotFound(err) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -113,7 +113,7 @@ func (h *Handler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) DeleteProfile(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	profile := &pdaiv1alpha1.PDEngineProfile{}
-	if err := h.client.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "default"}, profile); err != nil {
+	if err := h.reader.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "default"}, profile); err != nil {
 		if errors.IsNotFound(err) {
 			w.WriteHeader(http.StatusOK)
 			return

@@ -48,7 +48,7 @@ func newTestServer(t *testing.T) (*apiserver.Server, int) {
 	_ = pdaiv1alpha1.AddToScheme(s)
 	cl := fake.NewClientBuilder().WithScheme(s).Build()
 	port := freePort(t)
-	srv := apiserver.New(fmt.Sprintf(":%d", port), cl, s)
+	srv := apiserver.New(fmt.Sprintf(":%d", port), cl, cl, s)
 	return srv, port
 }
 

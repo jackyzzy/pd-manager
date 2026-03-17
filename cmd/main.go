@@ -221,7 +221,9 @@ func main() {
 	}
 
 	// Register the REST API server as a manager Runnable.
-	apiSrv := apiserver.New(apiAddr, mgr.GetClient(), mgr.GetScheme())
+	// mgr.GetAPIReader() bypasses the informer cache so REST API reads always
+	// reflect the current state from the Kubernetes API server.
+	apiSrv := apiserver.New(apiAddr, mgr.GetClient(), mgr.GetAPIReader(), mgr.GetScheme())
 	if err := mgr.Add(apiSrv); err != nil {
 		setupLog.Error(err, "unable to add API server to manager")
 		os.Exit(1)

@@ -33,9 +33,10 @@ type Server struct {
 }
 
 // New creates a Server that listens on addr and uses the given client to proxy
-// requests to the Kubernetes API.
-func New(addr string, cl client.Client, scheme *runtime.Scheme) *Server {
-	h := handler.New(cl, scheme)
+// requests to the Kubernetes API. reader should be mgr.GetAPIReader() so that
+// list/get calls bypass the informer cache and always return current data.
+func New(addr string, cl client.Client, reader client.Reader, scheme *runtime.Scheme) *Server {
+	h := handler.New(cl, reader, scheme)
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/v1/pd-inference-services", h.List)

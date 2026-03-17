@@ -32,12 +32,15 @@ import (
 // Handler holds the Kubernetes client used to proxy API requests.
 type Handler struct {
 	client client.Client
+	reader client.Reader // direct, non-cached reader for accurate list/get results
 	scheme *runtime.Scheme
 }
 
-// New creates a Handler backed by the given client.
-func New(cl client.Client, scheme *runtime.Scheme) *Handler {
-	return &Handler{client: cl, scheme: scheme}
+// New creates a Handler backed by the given client and direct reader.
+// reader should be mgr.GetAPIReader() to bypass the informer cache and always
+// return up-to-date results from the Kubernetes API server.
+func New(cl client.Client, reader client.Reader, scheme *runtime.Scheme) *Handler {
+	return &Handler{client: cl, reader: reader, scheme: scheme}
 }
 
 // Create handles POST /api/v1/pd-inference-services.
@@ -62,7 +65,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 // List handles GET /api/v1/pd-inference-services.
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	list := &pdaiv1alpha1.PDInferenceServiceList{}
-	if err := h.client.List(context.Background(), list, client.InNamespace("default")); err != nil {
+	if err := h.reader.List(context.Background(), list, client.InNamespace("default")); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -76,7 +79,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	pdis := &pdaiv1alpha1.PDInferenceService{}
-	if err := h.client.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "default"}, pdis); err != nil {
+	if err := h.reader.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "default"}, pdis); err != nil {
 		if errors.IsNotFound(err) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -120,7 +123,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pdis := &pdaiv1alpha1.PDInferenceService{}
-	if err := h.client.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "default"}, pdis); err != nil {
+	if err := h.reader.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "default"}, pdis); err != nil {
 		if errors.IsNotFound(err) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -149,7 +152,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	pdis := &pdaiv1alpha1.PDInferenceService{}
-	if err := h.client.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "default"}, pdis); err != nil {
+	if err := h.reader.Get(context.Background(), types.NamespacedName{Name: name, Namespace: "default"}, pdis); err != nil {
 		if errors.IsNotFound(err) {
 			w.WriteHeader(http.StatusOK)
 			return
